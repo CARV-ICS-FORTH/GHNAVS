@@ -1,0 +1,4396 @@
+diff --git a/SConstruct b/SConstruct
+index 39e7ccc065..30149a2c6d 100755
+--- a/SConstruct
++++ b/SConstruct
+@@ -387,10 +387,23 @@ if main['GCC'] or main['CLANG']:
+ 
+     # Treat warnings as errors but white list some warnings that we
+     # want to allow (e.g., deprecation warnings).
++
+     main.Append(CCFLAGS=['-Werror',
+                          '-Wno-error=deprecated-declarations',
+                          '-Wno-error=deprecated',
+-                        ])
++                         '-Wno-error=cpp',
++                         #'-march=native',
++                         #'-O3',
++                         ])
++
++    #main.Append(CXXFLAGS=['-Werror',
++    #                     '-Wno-error=deprecated-declarations',
++    #                     '-Wno-error=deprecated',
++    #                     '-Wno-error=cpp',
++    #                     '-march=native',
++    #                     '-O3',
++    #                    ])
++
+ else:
+     print(termcap.Yellow + termcap.Bold + 'Error' + termcap.Normal, end=' ')
+     print("Don't know what compiler options to use for your compiler.")
+@@ -633,6 +646,7 @@ else:
+                     'Warning: pkg-config could not get protobuf flags.' +
+                     termcap.Normal)
+ 
++main['PROTOC'] = False
+ 
+ # Check for 'timeout' from GNU coreutils. If present, regressions will
+ # be run with a time limit. We require version 8.13 since we rely on
+diff --git a/configs/boot/hack_back_ckpt.rcS b/configs/boot/hack_back_ckpt.rcS
+index 4c38a4d325..a7bc6cfe26 100644
+--- a/configs/boot/hack_back_ckpt.rcS
++++ b/configs/boot/hack_back_ckpt.rcS
+@@ -31,6 +31,7 @@ else
+ 	/sbin/m5 exit
+ fi
+ 
++sleep 5
+ # Checkpoint the first execution
+ echo "Checkpointing simulation..."
+ /sbin/m5 checkpoint
+diff --git a/configs/common/CacheConfig.py b/configs/common/CacheConfig.py
+index f705ab09a5..f44d9ab250 100644
+--- a/configs/common/CacheConfig.py
++++ b/configs/common/CacheConfig.py
+@@ -77,6 +77,24 @@ def config_cache(options, system):
+ 
+         dcache_class, icache_class, l2_cache_class, walk_cache_class = \
+             core.HPI_DCache, core.HPI_ICache, core.HPI_L2, core.HPI_WalkCache
++    elif options.cpu_type == "ARM_Cortex_A76":
++        try:
++            import cores.arm.ARM_Cortex_A76 as core
++        except:
++            print("ARM_Cortex_A76 is unavailable")
++            sys.exit(1)
++        print("Selected A76")
++        dcache_class, icache_class, l2_cache_class, walk_cache_class = \
++            core.A76_L1D, core.A76_L1I, core.A76_L2, core.A76_WalkCache
++    elif options.cpu_type == "R_CPU":
++        try:
++            import cores.arm.R_CPU as core
++        except:
++            print("R_CPU is unavailable.")
++            sys.exit(1)
++        print("Selected R_CPU core")
++        dcache_class, icache_class, l2_cache_class, walk_cache_class = \
++            core.R_CPU_L1D, core.R_CPU_L1I, core.R_CPU_L2, core.R_CPU_WalkCache
+     else:
+         dcache_class, icache_class, l2_cache_class, walk_cache_class = \
+             L1_DCache, L1_ICache, L2Cache, None
+diff --git a/configs/common/CpuConfig.py b/configs/common/CpuConfig.py
+index 831287ddcd..2c8d30ab50 100644
+--- a/configs/common/CpuConfig.py
++++ b/configs/common/CpuConfig.py
+@@ -44,6 +44,9 @@ import inspect
+ import sys
+ from textwrap import TextWrapper
+ 
++# Import to enable the use of ARM cores with fs.py / se.py
++from common.cores.arm import *
++
+ # Dictionary of mapping names of real CPU models to classes.
+ _cpu_classes = {}
+ 
+@@ -78,9 +81,12 @@ def get(name):
+ 
+     try:
+         cpu_class = _cpu_classes[name]
++        print("Selected CPU class = ", cpu_class)
+         return cpu_class
+     except KeyError:
+         print("%s is not a valid CPU model." % (name,))
++        #Print CPU list in case of error
++        print_cpu_list()
+         sys.exit(1)
+ 
+ def print_cpu_list():
+diff --git a/configs/common/FSConfig.py b/configs/common/FSConfig.py
+index 2c90922625..adf36509fe 100644
+--- a/configs/common/FSConfig.py
++++ b/configs/common/FSConfig.py
+@@ -345,6 +345,12 @@ def makeArmSystem(mem_mode, machine_type, num_cpus=1, mdesc=None,
+ 
+         self.boot_osflags = fillInCmdline(mdesc, cmdline)
+ 
++    # ppetrak: The following is required to successfully boot more than 8 cores
++    # Link:
++    # https://gem5-users.gem5.narkive.com/zLCRsMdq/arm-with-64-cores-fs-hanges
++    #
++    self.realview.gic.gem5_extensions = True
++
+     if external_memory:
+         # I/O traffic enters iobus
+         self.external_io = ExternalMaster(port_data="external_io",
+diff --git a/configs/common/MemConfig.py b/configs/common/MemConfig.py
+index 3910cacbd1..03c38897dd 100644
+--- a/configs/common/MemConfig.py
++++ b/configs/common/MemConfig.py
+@@ -167,6 +167,8 @@ def config_mem(options, system):
+     opt_mem_ranks = getattr(options, "mem_ranks", None)
+     opt_dram_powerdown = getattr(options, "enable_dram_powerdown", None)
+ 
++    # ppetrak: adjust mem type in heterogeneous systems
++    #
+     if opt_mem_type == "HMC_2500_1x32":
+         HMChost = HMC.config_hmc_host_ctrl(options, system)
+         HMC.config_hmc_dev(options, system, HMChost.hmc_host)
+diff --git a/configs/common/Options.py b/configs/common/Options.py
+index f6fa0d0319..4ca8bccd3e 100644
+--- a/configs/common/Options.py
++++ b/configs/common/Options.py
+@@ -121,8 +121,8 @@ def addNoISAOptions(parser):
+     parser.add_option("--num-l2caches", type="int", default=1)
+     parser.add_option("--num-l3caches", type="int", default=1)
+     parser.add_option("--l1d_size", type="string", default="64kB")
+-    parser.add_option("--l1i_size", type="string", default="32kB")
+-    parser.add_option("--l2_size", type="string", default="2MB")
++    parser.add_option("--l1i_size", type="string", default="64kB")
++    parser.add_option("--l2_size", type="string", default="256kB")
+     parser.add_option("--l3_size", type="string", default="16MB")
+     parser.add_option("--l1d_assoc", type="int", default=2)
+     parser.add_option("--l1i_assoc", type="int", default=2)
+diff --git a/configs/common/cores/arm/ARM_Cortex_A76.py b/configs/common/cores/arm/ARM_Cortex_A76.py
+new file mode 100644
+index 0000000000..a9a7a12b01
+--- /dev/null
++++ b/configs/common/cores/arm/ARM_Cortex_A76.py
+@@ -0,0 +1,223 @@
++# Copyright (c) 2012 The Regents of The University of Michigan
++# All rights reserved.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions are
++# met: redistributions of source code must retain the above copyright
++# notice, this list of conditions and the following disclaimer;
++# redistributions in binary form must reproduce the above copyright
++# notice, this list of conditions and the following disclaimer in the
++# documentation and/or other materials provided with the distribution;
++# neither the name of the copyright holders nor the names of its
++# contributors may be used to endorse or promote products derived from
++# this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++#
++# Authors: ICS-FORTH, Polydoros Petrakis <ppetrak@ics.forth.gr>
++# Authors: ICS-FORTH, Vassilis Papaefstathiou <papaef@ics.forth.gr>
++# https://en.wikichip.org/wiki/arm_holdings/microarchitectures/cortex-a76
++# https://www.anandtech.com/show/12785/\
++#    arm-cortex-a76-cpu-unveiled-7nm-powerhouse/2
++# https://www.anandtech.com/show/12785/\
++#        arm-cortex-a76-cpu-unveiled-7nm-powerhouse/3
++
++from __future__ import print_function
++from __future__ import absolute_import
++
++from m5.objects import *
++import m5
++m5.util.addToPath('../../')
++from common.Caches import *
++
++#from common import CpuConfig
++#from common import MemConfig
++
++# Simple ALU Instructions have a latency of 1
++class ARM_Cortex_A76_Simple_Int(FUDesc):
++    opList = [ OpDesc(opClass='IntAlu', opLat=1) ]
++    count = 3
++
++# Complex ALU instructions have a variable latencies
++class ARM_Cortex_A76_Complex_Int(FUDesc):
++    opList = [ OpDesc(opClass='IntMult', opLat=3, pipelined=True),
++               OpDesc(opClass='IntDiv', opLat=12, pipelined=False),
++               OpDesc(opClass='IprAccess', opLat=3, pipelined=True) ]
++    count = 2
++
++# Floating point and SIMD instructions
++class ARM_Cortex_A76_FP(FUDesc):
++    opList = [ OpDesc(opClass='SimdAdd', opLat=4),
++               OpDesc(opClass='SimdAddAcc', opLat=4),
++               OpDesc(opClass='SimdAlu', opLat=4),
++               OpDesc(opClass='SimdCmp', opLat=4),
++               OpDesc(opClass='SimdCvt', opLat=3),
++               OpDesc(opClass='SimdMisc', opLat=3),
++               OpDesc(opClass='SimdMult',opLat=5),
++               OpDesc(opClass='SimdMultAcc',opLat=5),
++               OpDesc(opClass='SimdShift',opLat=3),
++               OpDesc(opClass='SimdShiftAcc', opLat=3),
++               OpDesc(opClass='SimdDiv', opLat=9, pipelined=False),
++               OpDesc(opClass='SimdSqrt', opLat=9),
++               OpDesc(opClass='SimdFloatAdd',opLat=5),
++               OpDesc(opClass='SimdFloatAlu',opLat=5),
++               OpDesc(opClass='SimdFloatCmp', opLat=3),
++               OpDesc(opClass='SimdFloatCvt', opLat=3),
++               OpDesc(opClass='SimdFloatDiv', opLat=3),
++               OpDesc(opClass='SimdFloatMisc', opLat=3),
++               OpDesc(opClass='SimdFloatMult', opLat=3),
++               OpDesc(opClass='SimdFloatMultAcc',opLat=5),
++               OpDesc(opClass='SimdFloatSqrt', opLat=9),
++               OpDesc(opClass='SimdReduceAdd'),
++               OpDesc(opClass='SimdReduceAlu'),
++               OpDesc(opClass='SimdReduceCmp'),
++               OpDesc(opClass='SimdFloatReduceAdd'),
++               OpDesc(opClass='SimdFloatReduceCmp'),
++               OpDesc(opClass='FloatAdd', opLat=5),
++               OpDesc(opClass='FloatCmp', opLat=5),
++               OpDesc(opClass='FloatCvt', opLat=5),
++               OpDesc(opClass='FloatDiv', opLat=9, pipelined=False),
++               OpDesc(opClass='FloatSqrt', opLat=33, pipelined=False),
++               OpDesc(opClass='FloatMult', opLat=4),
++               OpDesc(opClass='FloatMultAcc', opLat=5),
++               OpDesc(opClass='FloatMisc', opLat=3) ]
++    count = 2
++
++# Load/Store Units
++class ARM_Cortex_A76_Load(FUDesc):
++    opList = [ OpDesc(opClass='MemRead'),
++               OpDesc(opClass='FloatMemRead') ]
++    count = 2
++
++class ARM_Cortex_A76_Store(FUDesc):
++    opList = [ OpDesc(opClass='MemWrite'),
++               OpDesc(opClass='FloatMemWrite') ]
++    count = 1
++
++class ARM_Cortex_A76_PredALU(FUDesc):
++    opList = [ OpDesc(opClass='SimdPredAlu') ]
++    count = 1
++
++# Functional Units for this CPU
++class ARM_Cortex_A76_FUP(FUPool):
++    FUList = [ARM_Cortex_A76_Simple_Int(),
++              ARM_Cortex_A76_Complex_Int(),
++              ARM_Cortex_A76_Load(),
++              ARM_Cortex_A76_Store(),
++              ARM_Cortex_A76_PredALU(),
++              ARM_Cortex_A76_FP()]
++
++# Bi-Mode Branch Predictor
++class ARM_Cortex_A76_BP(BiModeBP):
++    globalPredictorSize = 8192
++    globalCtrBits = 2
++    choicePredictorSize = 8192
++    choiceCtrBits = 2
++    BTBEntries = 4096
++    BTBTagSize = 16
++    RASSize = 16
++    instShiftAmt = 2
++
++class ARM_Cortex_A76(DerivO3CPU):
++    LSQDepCheckShift = 0
++    LFSTSize = 1024
++    SSITSize = 1024
++    decodeToFetchDelay = 1
++    renameToFetchDelay = 1
++    iewToFetchDelay = 1
++    commitToFetchDelay = 1
++    renameToDecodeDelay = 1
++    iewToDecodeDelay = 1
++    commitToDecodeDelay = 1
++    iewToRenameDelay = 1
++    commitToRenameDelay = 1
++    commitToIEWDelay = 1
++    fetchWidth = 4
++    fetchBufferSize = 16
++    fetchToDecodeDelay = 1
++    decodeWidth = 4
++    decodeToRenameDelay = 1
++    renameWidth = 4
++    renameToIEWDelay = 1
++    issueToExecuteDelay = 1
++    dispatchWidth = 8
++    issueWidth = 8
++    wbWidth = 8
++    fuPool = ARM_Cortex_A76_FUP()
++    iewToCommitDelay = 1
++    renameToROBDelay = 1
++    commitWidth = 8
++    squashWidth = 8
++    trapLatency = 13
++    backComSize = 5
++    forwardComSize = 5
++    numROBEntries = 192
++    # the default value for numPhysVecPredRegs  is 32 in O3 config
++    numPhysVecPredRegs = 64
++    LQEntries = 68
++    SQEntries = 72
++    numIQEntries = 120
++
++    switched_out = False
++    #branchPred = ARM_Cortex_A76_BP()
++    branchPred = Param.BranchPredictor(TournamentBP(
++        numThreads = Parent.numThreads), "Branch Predictor")
++
++# The following lines were copied from file devices.py
++# provided by BSC (and adjusted by FORTH to match A76)
++
++class A76_L1I(L1_ICache):
++    tag_latency = 1
++    data_latency = 1
++    response_latency = 1
++    mshrs = 8
++    tgts_per_mshr = 8
++    size = '64kB'
++    assoc = 4
++
++class A76_L1D(L1_DCache):
++    tag_latency = 2
++    data_latency = 2
++    response_latency = 1
++    mshrs = 24
++    tgts_per_mshr = 16
++    size = '64kB'
++    assoc = 4
++    write_buffers = 24
++
++class A76_WalkCache(PageTableWalkerCache):
++    tag_latency = 4
++    data_latency = 4
++    response_latency = 4
++    mshrs = 6
++    tgts_per_mshr = 8
++    size = '1kB'
++    assoc = 8
++    write_buffers = 16
++
++class A76_L2(L2Cache):
++    tag_latency = 9
++    data_latency = 9
++    response_latency = 5
++    mshrs = 24
++    tgts_per_mshr = 16
++    write_buffers = 24
++    size = '256kB'
++    assoc = 8
++    clusivity='mostly_incl' #if not LLC
++    prefetch_on_access = True
++    # Simple next line prefetcher
++    # prefetcher = StridePrefetcher(degree=8, latency = 1)
++    prefetcher = TaggedPrefetcher(degree=8, latency = 1, queue_size = 64)
++    #tags = LRU() ## ppetrak: this needs extra imports to work.
++
+diff --git a/configs/common/cores/arm/R_CPU.py b/configs/common/cores/arm/R_CPU.py
+new file mode 100644
+index 0000000000..d09ce5f313
+--- /dev/null
++++ b/configs/common/cores/arm/R_CPU.py
+@@ -0,0 +1,215 @@
++# Copyright (c) 2012 The Regents of The University of Michigan
++# All rights reserved.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions are
++# met: redistributions of source code must retain the above copyright
++# notice, this list of conditions and the following disclaimer;
++# redistributions in binary form must reproduce the above copyright
++# notice, this list of conditions and the following disclaimer in the
++# documentation and/or other materials provided with the distribution;
++# neither the name of the copyright holders nor the names of its
++# contributors may be used to endorse or promote products derived from
++# this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++#
++# Authors: ICS-FORTH, Polydoros Petrakis <ppetrak@ics.forth.gr>
++# Authors: ICS-FORTH, Vassilis Papaefstathiou <papaef@ics.forth.gr>
++
++from __future__ import print_function
++from __future__ import absolute_import
++
++from m5.objects import *
++import m5
++m5.util.addToPath('../../')
++from common.Caches import *
++###
++#from common import CpuConfig
++#from common import MemConfig
++
++# Simple ALU Instructions have a latency of 1
++class R_CPU_Simple_Int(FUDesc):
++    opList = [ OpDesc(opClass='IntAlu', opLat=1) ]
++    count = 3
++
++# Complex ALU instructions have a variable latencies
++class R_CPU_Complex_Int(FUDesc):
++    opList = [ OpDesc(opClass='IntMult', opLat=3, pipelined=True),
++               OpDesc(opClass='IntDiv', opLat=12, pipelined=False),
++               OpDesc(opClass='IprAccess', opLat=3, pipelined=True) ]
++    count = 2
++
++# Floating point and SIMD instructions
++class R_CPU_FP(FUDesc):
++    opList = [ OpDesc(opClass='SimdAdd', opLat=4),
++               OpDesc(opClass='SimdAddAcc', opLat=4),
++               OpDesc(opClass='SimdAlu', opLat=4),
++               OpDesc(opClass='SimdCmp', opLat=4),
++               OpDesc(opClass='SimdCvt', opLat=3),
++               OpDesc(opClass='SimdMisc', opLat=3),
++               OpDesc(opClass='SimdMult',opLat=5),
++               OpDesc(opClass='SimdMultAcc',opLat=5),
++               OpDesc(opClass='SimdShift',opLat=3),
++               OpDesc(opClass='SimdShiftAcc', opLat=3),
++               OpDesc(opClass='SimdDiv', opLat=9, pipelined=False),
++               OpDesc(opClass='SimdSqrt', opLat=9),
++               OpDesc(opClass='SimdFloatAdd',opLat=5),
++               OpDesc(opClass='SimdFloatAlu',opLat=5),
++               OpDesc(opClass='SimdFloatCmp', opLat=3),
++               OpDesc(opClass='SimdFloatCvt', opLat=3),
++               OpDesc(opClass='SimdFloatDiv', opLat=3),
++               OpDesc(opClass='SimdFloatMisc', opLat=3),
++               OpDesc(opClass='SimdFloatMult', opLat=3),
++               OpDesc(opClass='SimdFloatMultAcc',opLat=5),
++               OpDesc(opClass='SimdFloatSqrt', opLat=9),
++               OpDesc(opClass='SimdReduceAdd'),
++               OpDesc(opClass='SimdReduceAlu'),
++               OpDesc(opClass='SimdReduceCmp'),
++               OpDesc(opClass='SimdFloatReduceAdd'),
++               OpDesc(opClass='SimdFloatReduceCmp'),
++               OpDesc(opClass='FloatAdd', opLat=5),
++               OpDesc(opClass='FloatCmp', opLat=5),
++               OpDesc(opClass='FloatCvt', opLat=5),
++               OpDesc(opClass='FloatDiv', opLat=9, pipelined=False),
++               OpDesc(opClass='FloatSqrt', opLat=33, pipelined=False),
++               OpDesc(opClass='FloatMult', opLat=4),
++               OpDesc(opClass='FloatMultAcc', opLat=5),
++               OpDesc(opClass='FloatMisc', opLat=3) ]
++    count = 2
++
++# Load/Store Units
++class R_CPU_Load(FUDesc):
++    opList = [ OpDesc(opClass='MemRead'),
++               OpDesc(opClass='FloatMemRead') ]
++    count = 2
++
++class R_CPU_Store(FUDesc):
++    opList = [ OpDesc(opClass='MemWrite'),
++               OpDesc(opClass='FloatMemWrite') ]
++    count = 1
++
++class R_CPU_PredALU(FUDesc):
++    opList = [ OpDesc(opClass='SimdPredAlu') ]
++    count = 1
++
++# Functional Units for this CPU
++class R_CPU_FUP(FUPool):
++    FUList = [R_CPU_Simple_Int(),
++              R_CPU_Complex_Int(),
++              R_CPU_Load(),
++              R_CPU_Store(),
++              R_CPU_PredALU(),
++              R_CPU_FP()]
++
++# Bi-Mode Branch Predictor
++class R_CPU_BP(BiModeBP):
++    globalPredictorSize = 8192
++    globalCtrBits = 2
++    choicePredictorSize = 8192
++    choiceCtrBits = 2
++    BTBEntries = 4096
++    BTBTagSize = 16
++    RASSize = 16
++    instShiftAmt = 2
++
++class R_CPU(DerivO3CPU):
++    #type='R_CPU'
++    LSQDepCheckShift = 0
++    LFSTSize = 1024
++    SSITSize = 1024
++    decodeToFetchDelay = 1
++    renameToFetchDelay = 1
++    iewToFetchDelay = 1
++    commitToFetchDelay = 1
++    renameToDecodeDelay = 1
++    iewToDecodeDelay = 1
++    commitToDecodeDelay = 1
++    iewToRenameDelay = 1
++    commitToRenameDelay = 1
++    commitToIEWDelay = 1
++    fetchToDecodeDelay = 1
++    decodeToRenameDelay = 1
++    renameWidth = 4
++    renameToIEWDelay = 1
++    issueToExecuteDelay = 1
++    dispatchWidth = 8
++    wbWidth = 8
++    fuPool = R_CPU_FUP()
++    iewToCommitDelay = 1
++    renameToROBDelay = 1
++    commitWidth = 8
++    squashWidth = 8
++    trapLatency = 13
++    backComSize = 5
++    forwardComSize = 5
++    fetchWidth = 4
++    decodeWidth = 4
++    issueWidth = 8
++    numPhysVecPredRegs = 64
++    numPhysVecRegs = 364
++    numIQEntries = 120
++    LQEntries = 96
++    SQEntries = 96
++    fetchBufferSize = 64
++    #fetchQueueSize = 64
++    numROBEntries = 224
++    switched_out = False
++    #branchPred = R_CPU_BP()
++    branchPred = Param.BranchPredictor(TournamentBP(
++        numThreads = Parent.numThreads), "Branch Predictor")
++
++class R_CPU_L1I(L1_ICache):
++    tag_latency = 1
++    data_latency = 1
++    response_latency = 1
++    mshrs = 8
++    tgts_per_mshr = 8
++    size = '64kB'
++    assoc = 4
++
++class R_CPU_L1D(L1_DCache):
++    tag_latency = 2
++    data_latency = 2
++    response_latency = 1
++    mshrs = 24
++    tgts_per_mshr = 16
++    size = '64kB'
++    assoc = 4
++    write_buffers = 24
++
++class R_CPU_WalkCache(PageTableWalkerCache):
++    tag_latency = 4
++    data_latency = 4
++    response_latency = 4
++    mshrs = 6
++    tgts_per_mshr = 8
++    size = '1kB'
++    assoc = 8
++    write_buffers = 16
++
++class R_CPU_L2(L2Cache):
++    tag_latency = 9
++    data_latency = 9
++    response_latency = 5
++    mshrs = 24
++    tgts_per_mshr = 16
++    write_buffers = 24
++    size = '256kB'
++    assoc = 8
++    clusivity='mostly_incl' #if not LLC
++    prefetch_on_access = True
++    # Simple next line prefetcher
++    # prefetcher = StridePrefetcher(degree=8, latency = 1)
++    prefetcher = TaggedPrefetcher(degree=8, latency = 1, queue_size = 64)
++    #tags = LRU() ## ppetrak: this needs extra imports to work.
+diff --git a/configs/example/garnet_synth_traffic.py b/configs/example/garnet_synth_traffic.py
+index 9878c23f1c..4e3efe4c3d 100644
+--- a/configs/example/garnet_synth_traffic.py
++++ b/configs/example/garnet_synth_traffic.py
+@@ -145,7 +145,7 @@ root = Root(full_system = False, system = system)
+ root.system.mem_mode = 'timing'
+ 
+ # Not much point in this being higher than the L1 latency
+-m5.ticks.setGlobalFrequency('1ns')
++m5.ticks.setGlobalFrequency('0.5ns')
+ 
+ # instantiate configuration
+ m5.instantiate()
+diff --git a/configs/example/se.py b/configs/example/se.py
+index f43206ad2b..24f7c9b3db 100644
+--- a/configs/example/se.py
++++ b/configs/example/se.py
+@@ -110,10 +110,12 @@ def get_processes(options):
+             process.errout = errouts[idx]
+ 
+         multiprocesses.append(process)
++        #print("Info: Appending workload[%d]: %s" % (idx, wrkld))
+         idx += 1
+ 
+     if options.smt:
+-        assert(options.cpu_type == "DerivO3CPU")
++        assert(options.cpu_type == "DerivO3CPU" or \
++            options.cpu_type == "ARM_Cortex_A76" )
+         return multiprocesses, idx
+     else:
+         return multiprocesses, 1
+diff --git a/configs/network/Network.py b/configs/network/Network.py
+index c1e55bcdc1..2dce885185 100644
+--- a/configs/network/Network.py
++++ b/configs/network/Network.py
+@@ -25,6 +25,8 @@
+ # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #
+ # Authors: Tushar Krishna
++# Authors: ICS-FORTH, Polydoros Petrakis <ppetrak@ics.forth.gr>
++# Extensions in order to support multiple NoC layers
+ 
+ from __future__ import print_function
+ from __future__ import absolute_import
+@@ -76,6 +78,9 @@ def define_options(parser):
+     parser.add_option("--garnet-deadlock-threshold", action="store",
+                       type="int", default=50000,
+                       help="network-level deadlock threshold.")
++    parser.add_option("--noc_layers", action="store", type=int,
++                        default=6,
++                        help="""Number of NoCs (or NoC layers)""")
+ 
+ 
+ def create_network(options, ruby):
+@@ -114,9 +119,61 @@ def init_network(options, network, InterfaceClass):
+     if options.network == "simple":
+         network.setup_buffers()
+ 
++    # Define the number of NoC layers
++    # This parameter will be used by the NI class
++    max_layers = options.noc_layers
++
++    print("Info: Number of Ext_links = %d" % len(network.ext_links))
++    print("Info: NoC layers = %d" % max_layers)
++
++    # ppetrak: Adjust the way that the NIs are generated. Generate a single NI
++    # for ext_links/noc_layers instead of one NI for every ext_link
++
++    # ppetrak:
++    # By using offset vnet traffic incoming from a specific vnet (e.g. VNET-0)
++    # can be split into 2 different VNETS ((1) incoming vnet and incoming_vnet + (2) vnet_offset )
++    # Set vnet_offset to a value equal to the number of vnets that each specific CC protocol uses.
++    # offset_vnet = 3 for MOESI_CMP_directory. Set use_offset_vnets = False for disabling this feature.
++
++    MOESI_CMP_directory_offset_vnet = 3
++    use_offset_vnets = False
++
+     if InterfaceClass != None:
+-        netifs = [InterfaceClass(id=i) \
+-                  for (i,n) in enumerate(network.ext_links)]
++        netifs = []
++        # In m_id >=32 are given to remaining nodes for Quadrant Topologies with 16 cores / 16 SLC / 8 Dirs
++        if ( use_offset_vnets and
++            (max_layers > MOESI_CMP_directory_offset_vnet ) and
++            (network.topology == "Mesh_EPI_quadrant"
++            or network.topology == "Mesh_EPI_quadrant_p1"
++            or network.topology == "Mesh_EPI_quadrant_p2"
++            or network.topology == "Mesh_EPI_quadrant_p3"
++            or network.topology == "Mesh_EPI_quadrant_p4" )):
++            assert( options.num_dirs == 8 and (options.num_cpus == options.num_l2caches))
++            assert ( max_layers == 2 * MOESI_CMP_directory_offset_vnet )
++
++            for i in range(len(network.ext_links)/max_layers):
++                if(i < options.num_cpus + options.num_l2caches + options.num_dirs ):
++                    # Do not offset the first 8 cores, first 8 SLCs, and the 4 even dirs
++                    if ( (i < options.num_cpus/2 )
++                        or (i >= options.num_cpus and i < options.num_cpus + options.num_l2caches/2)
++                        or (i >= options.num_cpus + options.num_l2caches and i%2 == 0) ):
++                        t_offset_vnet = 0
++                    else:
++                        t_offset_vnet = MOESI_CMP_directory_offset_vnet
++                    netifs.append(InterfaceClass(id=i, noc_layers = max_layers, offset_vnet = t_offset_vnet))
++                # Extra nodes (io/DMAs etcs)
++                else:
++                    t_offset_vnet = 0
++                    netifs.append(InterfaceClass(id=i, noc_layers = max_layers, offset_vnet = t_offset_vnet))
++                print('NI[%d], vnet_offset = %d' % (i, t_offset_vnet))
++        else:
++            for i in range(len(network.ext_links)/max_layers):
++                netifs.append(InterfaceClass(id=i, noc_layers = max_layers, offset_vnet = 0))
++
++        #netifs = [InterfaceClass(id=i, noc_layers = max_layers) \
++        #    for i in range(len(network.ext_links)/max_layers) ]
++        #[print("Info: NI[%d] (netifs @ Network.py)" % i) \
++        #    for i in range(len(network.ext_links)/max_layers) ]
+         network.netifs = netifs
+ 
+     if options.network_fault_model:
+diff --git a/configs/ruby/MOESI_CMP_directory.py b/configs/ruby/MOESI_CMP_directory.py
+index 18e9ef6c84..1c009f1822 100644
+--- a/configs/ruby/MOESI_CMP_directory.py
++++ b/configs/ruby/MOESI_CMP_directory.py
+@@ -138,8 +138,9 @@ def create_system(options, full_system, system, dma_ports, bootmem,
+         l1_cntrl.responseToL1Cache.slave = ruby_system.network.master
+         l1_cntrl.triggerQueue = MessageBuffer(ordered = True)
+ 
+-
+     # Create the L2s interleaved addr ranges
++    # ppetrak: L2 interleaving code
++    #
+     l2_addr_ranges = []
+     l2_bits = int(math.log(options.num_l2caches, 2))
+     numa_bit = block_size_bits + l2_bits - 1
+@@ -148,6 +149,7 @@ def create_system(options, full_system, system, dma_ports, bootmem,
+     for i in range(options.num_l2caches):
+         ranges = []
+         for r in sysranges:
++
+             addr_range = AddrRange(r.start, size = r.size(),
+                                     intlvHighBit = numa_bit,
+                                     intlvBits = l2_bits,
+@@ -267,6 +269,11 @@ def create_system(options, full_system, system, dma_ports, bootmem,
+ 
+         all_cntrls = all_cntrls + [io_controller]
+ 
+-    ruby_system.network.number_of_virtual_networks = 3
++    if (options.noc_layers > 1):
++        ruby_system.network.number_of_virtual_networks = options.noc_layers
++    else:
++        ruby_system.network.number_of_virtual_networks = 3
++
++
+     topology = create_topology(all_cntrls, options)
+     return (cpu_sequencers, mem_dir_cntrl_nodes, topology)
+diff --git a/configs/ruby/MOESI_hammer.py b/configs/ruby/MOESI_hammer.py
+index 9ec7124df2..85f3ffa5e5 100644
+--- a/configs/ruby/MOESI_hammer.py
++++ b/configs/ruby/MOESI_hammer.py
+@@ -40,6 +40,12 @@ from common import FileSystemConfig
+ #
+ class L1Cache(RubyCache): pass
+ class L2Cache(RubyCache): pass
++
++# class L1Cache(RubyCache): #ppetrak
++#     dataArrayBanks = 16    #Param.Int(1, "Number of banks for the data array")
++#     tagArrayBanks = 16     # Param.Int(1, "Number of banks for the tag array")
++#     dataAccessLatency = 1 #Param.Cycles(1, "cycles for a data array access")
++#     tagAccessLatency = 1  #Param.Cycles(1, "cycles for a tag array access")
+ #
+ # Probe filter is a cache
+ #
+diff --git a/configs/ruby/Ruby.py b/configs/ruby/Ruby.py
+index c9ae251d91..6fa9ecea1d 100644
+--- a/configs/ruby/Ruby.py
++++ b/configs/ruby/Ruby.py
+@@ -97,9 +97,11 @@ def setup_memory_controllers(system, ruby, dir_cntrls, options):
+     if options.numa_high_bit:
+         dir_bits = int(math.log(options.num_dirs, 2))
+         intlv_size = 2 ** (options.numa_high_bit - dir_bits + 1)
++        # ppetrak: Mem Interleaving step is defined here (num_high_bit)
+     else:
+         # if the numa_bit is not specified, set the directory bits as the
+         # lowest bits above the block offset bits
++        # ppetrak: Mem Interleaving step is defined here (num_high_bit)
+         intlv_size = options.cacheline_size
+ 
+     # Sets bits to be used for interleaving.  Creates memory controllers
+diff --git a/configs/topologies/Mesh_EPI_quadrant_p1.py b/configs/topologies/Mesh_EPI_quadrant_p1.py
+new file mode 100644
+index 0000000000..01fd4d8203
+--- /dev/null
++++ b/configs/topologies/Mesh_EPI_quadrant_p1.py
+@@ -0,0 +1,332 @@
++# Copyright (c) 2010 Advanced Micro Devices, Inc.
++#               2016 Georgia Institute of Technology
++# All rights reserved.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions are
++# met: redistributions of source code must retain the above copyright
++# notice, this list of conditions and the following disclaimer;
++# redistributions in binary form must reproduce the above copyright
++# notice, this list of conditions and the following disclaimer in the
++# documentation and/or other materials provided with the distribution;
++# neither the name of the copyright holders nor the names of its
++# contributors may be used to endorse or promote products derived from
++# this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++#
++# Authors: Brad Beckmann
++#          Tushar Krishna
++# Authors: ICS-FORTH, Polydoros Petrakis <ppetrak@ics.forth.gr>
++# Based on Mesh_XY.py topology file and adjusted
++# in order to support multi-layered NoC
++# Describes a Quadrant Topology
++
++from __future__ import print_function
++from __future__ import absolute_import
++
++from m5.params import *
++from m5.objects import *
++
++from common import FileSystemConfig
++
++from .BaseTopology import SimpleTopology
++
++# Creates a generic Mesh
++# and directory controllers.
++# XY routing is enforced (using link weights)
++# to guarantee deadlock freedom.
++
++class Mesh_EPI_quadrant_p1(SimpleTopology):
++    description='Mesh_EPI_quadrant_p1'
++    def __init__(self, controllers):
++        self.nodes = controllers
++
++    # Makes a generic mesh
++    # assuming an equal number of cache and directory cntrls
++
++    def makeTopology(self, options, network, IntLink, ExtLink, Router):
++        nodes = self.nodes
++
++        #ppetrak. The following limitation could be adjusted
++        #num_routers = options.num_cpus
++        num_rows = options.mesh_rows
++        num_routers = num_rows * num_rows
++
++        assert(num_rows == 4)
++
++        # default values for link latency and router latency.
++        # Can be over-ridden on a per link/router basis
++        link_latency = options.link_latency # used by simple and garnet
++        router_latency = options.router_latency # only used by garnet
++
++        print_extra_info = True
++
++        # There must be an evenly divisible number of cntrls to routers
++        # Also, obviously the number or rows must be <= the number of routers
++        cntrls_per_router, remainder = divmod(len(nodes), num_routers)
++        assert(num_rows > 0 and num_rows <= num_routers)
++        num_columns = int(num_routers / num_rows)
++        assert(num_columns * num_rows == num_routers)
++
++        if print_extra_info:
++            print("Info: num_routers (per layer): %d" % (num_routers))
++            #[print("Info: %s" % node) for node in nodes]
++            print("Info: Controllers per router: %d, rows = %d, columns = %d,"
++            " remainder = %d" \
++            % (cntrls_per_router, num_rows, num_columns, remainder))
++
++        # Create the routers in the mesh
++        max_layers = options.noc_layers
++
++        #ppetrak: Adjust (or remove) this if you need to try other CC protocols
++        assert(max_layers == 6 or max_layers == 1 or max_layers == 3)
++
++        routers = [Router(router_id=i, latency = router_latency) \
++            for i in range(num_routers*max_layers)]
++
++        network.routers = routers
++
++        # link counter to set unique link ids
++        link_count = 0
++
++        # Add all but the remainder nodes to the list of nodes to be uniformly
++        # distributed across the network.
++        network_nodes = []
++        remainder_nodes = []
++        l1_nodes = []
++        l2_nodes = []
++        dir_nodes = []
++        for node_index in range(len(nodes)):
++            if print_extra_info:
++                print('Node[%d]: %s' % (node_index, nodes[node_index]))
++
++            if 'dir_cntr' in str(nodes[node_index]):
++                dir_nodes.append(nodes[node_index])
++            elif 'l1_cntrl' in str(nodes[node_index]):
++                l1_nodes.append(nodes[node_index])
++            elif 'l2_cntrl' in str(nodes[node_index]):
++                l2_nodes.append(nodes[node_index])
++            else:
++                if node_index < (len(nodes) - remainder):
++                    network_nodes.append(nodes[node_index])
++                else:
++                    remainder_nodes.append(nodes[node_index])
++
++        assert(len(l1_nodes) == 8 or len(l1_nodes) == 16)
++        # Comment the l2 assert in case you want to test with
++        # garnet synthetic traffic
++        #
++        #assert(len(l2_nodes) == 8 or len(l2_nodes) == 16)
++        if print_extra_info:
++            print('Net nodes size = %d, remainder nodes = %d'
++                % (len(network_nodes), len(remainder_nodes)))
++        # Connect each node to the appropriate router
++        ext_links = []
++
++        for layer in range(max_layers):
++            for (i, n) in enumerate(network_nodes):
++                cntrl_level, router_id = divmod(i, num_routers)
++
++                assert(cntrl_level < cntrls_per_router)
++                if print_extra_info:
++                    print("Ext_link[%d], ext_node=%s, int_node(router)=%d" \
++                    % (link_count, n, (layer*num_routers)+router_id))
++
++                ext_links.append(ExtLink(link_id=link_count, ext_node=n,
++                                int_node=routers[(layer*num_routers)+router_id],
++                                latency = link_latency))
++                link_count += 1
++
++        # The following setup is for modeling Config_1
++        #
++        dir_router_id_list = [0, 4, 8, 12]
++        cpu_router_list = [6, 7, 9, 10, 11, 13, 14, 15]
++        slc_router_list = [6, 7, 9, 10, 11, 13, 14, 15]
++
++        assert(len(dir_nodes) % len(dir_router_id_list) == 0)
++        dir_controllers_per_router = len(dir_nodes) / len(dir_router_id_list)
++
++        # Handle directory nodes
++        # Adjust the way we attach dir controllers so that consecutive memory ranges
++        # are kept close
++        for (i, node) in enumerate(dir_nodes):
++            #Connect the dir nodes to NI
++            for layer in range(max_layers):
++                if print_extra_info:
++                    print("Info: <Dir node>: i = %d, layer = %d, Ext_link[%d], ext_node=%s, "
++                          "Int_node(router)=%d" \
++                            % (i, layer, link_count, node, (layer*num_routers) + dir_router_id_list[(i%len(dir_nodes))/dir_controllers_per_router] ))
++
++                ext_links.append(ExtLink(link_id=link_count, ext_node=node,
++                                        int_node=routers[(layer*num_routers)+
++                                        dir_router_id_list[ (i%len(dir_nodes))/dir_controllers_per_router ]],
++                                        latency = link_latency))
++                link_count += 1
++
++        # Handle l1 cache nodes
++        for (i, node) in enumerate(l1_nodes):
++            #Connect the dir nodes to NI
++            for layer in range(max_layers):
++                if print_extra_info:
++                    print("Info: <l1 node>: i = %d, layer = %d, Ext_link[%d], ext_node=%s, "
++                      "Int_node(router)=%d" \
++                        % (i, layer, link_count, node, (layer*num_routers) +
++                        cpu_router_list[i%len(cpu_router_list)]))
++
++                ext_links.append(ExtLink(link_id=link_count, ext_node=node,
++                                        int_node=routers[(layer*num_routers)+cpu_router_list[i%len(cpu_router_list)]],
++                                        latency = link_latency))
++                link_count += 1
++
++        # Handle l2 cache nodes, which acts as SLC in our case
++        for (i, node) in enumerate(l2_nodes):
++            #Connect the dir nodes to NI
++            for layer in range(max_layers):
++                if print_extra_info:
++                    print("Info: <l2 node>: i = %d, layer = %d, Ext_link[%d], ext_node=%s, "
++                      "Int_node(router)=%d" \
++                        % (i, layer, link_count, node, (layer*num_routers) + slc_router_list[i%len(slc_router_list)]))
++
++                ext_links.append(ExtLink(link_id=link_count, ext_node=node,
++                                        int_node=routers[(layer*num_routers)+
++                                        slc_router_list[i%len(slc_router_list)]],
++                                        latency = link_latency))
++                link_count += 1
++
++        if print_extra_info:
++            print("Total number of Ext links (not including remainder "
++            "nodes) = %d" % link_count)
++
++        # Original approach: Connect the remainding nodes to router 0
++        # This is now adjusted to connect remainder nodes to the
++        # 'router-0' of each NoC layer (id=layer*num_routers)
++        #
++        for (i, node) in enumerate(remainder_nodes):
++
++            #Connect the remainder nodes to NI
++            for layer in range(max_layers):
++                #if(node.type != 'DMA_Controller'):
++                #    print("Info: Remainder node %s(%s) is not a DMA controller"\
++                #        %(node, node.type))
++                assert(i < remainder)
++                if print_extra_info:
++                    print("Info: <Remainder node>: Ext_link[%d], ext_node=%s, "
++                    "Int_node(router)=%d" \
++                        % (link_count, node, layer*num_routers))
++
++                ext_links.append(ExtLink(link_id=link_count, ext_node=node,
++                                        int_node=routers[layer*num_routers],
++                                        latency = link_latency))
++                link_count += 1
++
++        network.ext_links = ext_links
++
++        # Create the mesh links.
++        int_links = []
++
++        # East output to West input links (weight = 1)
++        for layer in range(max_layers):
++            layer_offset = layer*num_routers
++
++            if print_extra_info:
++                print("Int_Links creation: Layer [%d]" % layer)
++                print("East to West")
++            for row in range(num_rows):
++                for col in range(num_columns):
++                    if (col + 1 < num_columns):
++                        east_out = col + (row * num_columns)
++                        west_in = (col + 1) + (row * num_columns)
++                        if print_extra_info:
++                            print("Int_Link [%d], router[%d] -> router[%d]" % \
++                                (link_count, layer_offset + east_out, layer_offset + west_in))
++
++                        int_links.append(IntLink(link_id=link_count,
++                                                src_node=routers[layer_offset + east_out],
++                                                dst_node=routers[layer_offset + west_in],
++                                                src_outport="East",
++                                                dst_inport="West",
++                                                latency = link_latency,
++                                                weight=1))
++                        link_count += 1
++
++            # West output to East input links (weight = 1)
++            if print_extra_info:
++                print("West to East")
++            for row in range(num_rows):
++                for col in range(num_columns):
++                    if (col + 1 < num_columns):
++                        east_in = col + (row * num_columns)
++                        west_out = (col + 1) + (row * num_columns)
++                        if print_extra_info:
++                            print("Int_Link [%d], router[%d] -> router[%d]" % \
++                                (link_count, layer_offset + west_out, layer_offset + east_in))
++
++                        int_links.append(IntLink(link_id=link_count,
++                                                src_node=routers[layer_offset + west_out],
++                                                dst_node=routers[layer_offset + east_in],
++                                                src_outport="West",
++                                                dst_inport="East",
++                                                latency = link_latency,
++                                                weight=1))
++                        link_count += 1
++
++            # North output to South input links (weight = 2)
++            if print_extra_info:
++                print("North to South")
++            for col in range(num_columns):
++                for row in range(num_rows):
++                    if (row + 1 < num_rows):
++                        north_out = col + (row * num_columns)
++                        south_in = col + ((row + 1) * num_columns)
++                        if print_extra_info:
++                            print("Int_Link [%d], router[%d] -> router[%d]" % \
++                            (link_count, layer_offset + north_out, layer_offset + south_in))
++
++                        int_links.append(IntLink(link_id=link_count,
++                                                src_node=routers[layer_offset + north_out],
++                                                dst_node=routers[layer_offset + south_in],
++                                                src_outport="North",
++                                                dst_inport="South",
++                                                latency = link_latency,
++                                                weight=2))
++                        link_count += 1
++
++            # South output to North input links (weight = 2)
++            if print_extra_info:
++                print("South to North")
++            for col in range(num_columns):
++                for row in range(num_rows):
++                    if (row + 1 < num_rows):
++                        north_in = col + (row * num_columns)
++                        south_out = col + ((row + 1) * num_columns)
++                        if print_extra_info:
++                            print("Int_Link [%d], router[%d] -> router[%d]" % \
++                            (link_count, layer_offset + south_out, layer_offset + north_in))
++
++                        int_links.append(IntLink(link_id=link_count,
++                                                src_node=routers[layer_offset + south_out],
++                                                dst_node=routers[layer_offset + north_in],
++                                                src_outport="South",
++                                                dst_inport="North",
++                                                latency = link_latency,
++                                                weight=2))
++                        link_count += 1
++
++        network.int_links = int_links
++
++    # Register nodes with filesystem
++    def registerTopology(self, options):
++        for i in xrange(options.num_cpus):
++            FileSystemConfig.register_node([i],
++                    MemorySize(options.mem_size) / options.num_cpus, i)
+diff --git a/configs/topologies/Mesh_XY.py b/configs/topologies/Mesh_XY.py
+index 66fbd36187..fd2cf69e65 100644
+--- a/configs/topologies/Mesh_XY.py
++++ b/configs/topologies/Mesh_XY.py
+@@ -45,7 +45,6 @@ from .BaseTopology import SimpleTopology
+ 
+ class Mesh_XY(SimpleTopology):
+     description='Mesh_XY'
+-
+     def __init__(self, controllers):
+         self.nodes = controllers
+ 
+@@ -54,7 +53,6 @@ class Mesh_XY(SimpleTopology):
+ 
+     def makeTopology(self, options, network, IntLink, ExtLink, Router):
+         nodes = self.nodes
+-
+         num_routers = options.num_cpus
+         num_rows = options.mesh_rows
+ 
+@@ -70,7 +68,6 @@ class Mesh_XY(SimpleTopology):
+         assert(num_rows > 0 and num_rows <= num_routers)
+         num_columns = int(num_routers / num_rows)
+         assert(num_columns * num_rows == num_routers)
+-
+         # Create the routers in the mesh
+         routers = [Router(router_id=i, latency = router_latency) \
+             for i in range(num_routers)]
+@@ -94,6 +91,7 @@ class Mesh_XY(SimpleTopology):
+         for (i, n) in enumerate(network_nodes):
+             cntrl_level, router_id = divmod(i, num_routers)
+             assert(cntrl_level < cntrls_per_router)
++            print("Ext_link[%d], ext_node=%s, int_node(router)=%d" % (link_count, n, router_id))
+             ext_links.append(ExtLink(link_id=link_count, ext_node=n,
+                                     int_node=routers[router_id],
+                                     latency = link_latency))
+@@ -115,11 +113,13 @@ class Mesh_XY(SimpleTopology):
+         int_links = []
+ 
+         # East output to West input links (weight = 1)
++        print("East to West")
+         for row in range(num_rows):
+             for col in range(num_columns):
+                 if (col + 1 < num_columns):
+                     east_out = col + (row * num_columns)
+                     west_in = (col + 1) + (row * num_columns)
++                    print("Int_Link [%d], router[%d] -> router[%d]" % (link_count, east_out, west_in))
+                     int_links.append(IntLink(link_id=link_count,
+                                              src_node=routers[east_out],
+                                              dst_node=routers[west_in],
+@@ -130,11 +130,13 @@ class Mesh_XY(SimpleTopology):
+                     link_count += 1
+ 
+         # West output to East input links (weight = 1)
++        print("West to East")
+         for row in range(num_rows):
+             for col in range(num_columns):
+                 if (col + 1 < num_columns):
+                     east_in = col + (row * num_columns)
+                     west_out = (col + 1) + (row * num_columns)
++                    print("Int_Link [%d], router[%d] -> router[%d]" % (link_count, west_out, east_in))
+                     int_links.append(IntLink(link_id=link_count,
+                                              src_node=routers[west_out],
+                                              dst_node=routers[east_in],
+@@ -145,11 +147,13 @@ class Mesh_XY(SimpleTopology):
+                     link_count += 1
+ 
+         # North output to South input links (weight = 2)
++        print("North to South")
+         for col in range(num_columns):
+             for row in range(num_rows):
+                 if (row + 1 < num_rows):
+                     north_out = col + (row * num_columns)
+                     south_in = col + ((row + 1) * num_columns)
++                    print("Int_Link [%d], router[%d] -> router[%d]" % (link_count, north_out, south_in))
+                     int_links.append(IntLink(link_id=link_count,
+                                              src_node=routers[north_out],
+                                              dst_node=routers[south_in],
+@@ -160,11 +164,13 @@ class Mesh_XY(SimpleTopology):
+                     link_count += 1
+ 
+         # South output to North input links (weight = 2)
++        print("South to North")
+         for col in range(num_columns):
+             for row in range(num_rows):
+                 if (row + 1 < num_rows):
+                     north_in = col + (row * num_columns)
+                     south_out = col + ((row + 1) * num_columns)
++                    print("Int_Link [%d], router[%d] -> router[%d]" % (link_count, south_out, north_in))
+                     int_links.append(IntLink(link_id=link_count,
+                                              src_node=routers[south_out],
+                                              dst_node=routers[north_in],
+diff --git a/site_scons/site_init.py b/site_scons/site_init.py
+index 351f49bc05..623e26e0a6 100644
+--- a/site_scons/site_init.py
++++ b/site_scons/site_init.py
+@@ -49,7 +49,7 @@ try:
+     # 0.98, and the second will fail for 0.98.0
+     EnsureSConsVersion(0, 98)
+     EnsureSConsVersion(0, 98, 1)
+-except SystemExit, e:
++except SystemExit as e:
+     print("""
+ For more details, see:
+     http://gem5.org/Dependencies
+@@ -59,7 +59,7 @@ For more details, see:
+ # pybind11 requires python 2.7
+ try:
+     EnsurePythonVersion(2, 7)
+-except SystemExit, e:
++except SystemExit as e:
+     print ("""
+ You can use a non-default installation of the Python interpreter by
+ rearranging your PATH so that scons finds the non-default 'python' and
+diff --git a/src/arch/arm/ArmISA.py b/src/arch/arm/ArmISA.py
+index 3c1f7dd114..0eb3130543 100644
+--- a/src/arch/arm/ArmISA.py
++++ b/src/arch/arm/ArmISA.py
+@@ -119,5 +119,5 @@ class ArmISA(SimObject):
+ 
+     # This is required because in SE mode a generic System SimObject is
+     # allocated, instead of an ArmSystem
+-    sve_vl_se = Param.SveVectorLength(1,
++    sve_vl_se = Param.SveVectorLength(2,
+         "SVE vector length in quadwords (128-bit), SE-mode only")
+diff --git a/src/arch/arm/ArmSystem.py b/src/arch/arm/ArmSystem.py
+index a92ae4fb70..fba17eab65 100644
+--- a/src/arch/arm/ArmSystem.py
++++ b/src/arch/arm/ArmSystem.py
+@@ -84,11 +84,13 @@ class ArmSystem(System):
+         "True if ASID is 16 bits in AArch64 (ARMv8)")
+     have_sve = Param.Bool(True,
+         "True if SVE is implemented (ARMv8)")
+-    sve_vl = Param.SveVectorLength(1,
++    sve_vl = Param.SveVectorLength(2,
+         "SVE vector length in quadwords (128-bit)")
+     have_lse = Param.Bool(True,
+         "True if LSE is implemented (ARMv8.1)")
+-    have_pan = Param.Bool(True,
++## ppetrak: Warning: There seems to be a problem to start the bootscript
++## with the newly introduced option of have_pan=True
++    have_pan = Param.Bool(False,
+         "True if Priviledge Access Never is implemented (ARMv8.1)")
+ 
+     semihosting = Param.ArmSemihosting(NULL,
+diff --git a/src/arch/arm/insts/fplib.cc b/src/arch/arm/insts/fplib.cc
+index 49305ecf27..29431b777b 100644
+--- a/src/arch/arm/insts/fplib.cc
++++ b/src/arch/arm/insts/fplib.cc
+@@ -37,7 +37,11 @@
+ * Authors: Edmund Grimley Evans
+ *          Thomas Grocutt
+ */
+-
++//
++// Added patch: arch-arm: Do not increment exponent if FPSCR.FZ in fplib,
++// It was submitted together with: arch-arm: SVE instructions do not use AHP format
++// https://gem5-review.googlesource.com/c/public/gem5/+/28107/2
++//
+ #include <stdint.h>
+ 
+ #include <cassert>
+@@ -394,14 +398,18 @@ fp16_unpack(int *sgn, int *exp, uint16_t *mnt, uint16_t x, int mode,
+     *exp = FP16_EXP(x);
+     *mnt = FP16_MANT(x);
+ 
+-    // Handle subnormals:
+     if (*exp) {
+         *mnt |= 1ULL << FP16_MANT_BITS;
+     } else {
+-        ++*exp;
++        // Handle subnormals:
+         // IDC (Input Denormal) is not set in this case.
+-        if (mode & FPLIB_FZ16)
++        if (*mnt) {
++            if (mode & FPLIB_FZ16) {
+             *mnt = 0;
++            } else {
++                ++*exp;
++            }
++        }
+     }
+ }
+ 
+@@ -413,14 +421,17 @@ fp32_unpack(int *sgn, int *exp, uint32_t *mnt, uint32_t x, int mode,
+     *exp = FP32_EXP(x);
+     *mnt = FP32_MANT(x);
+ 
+-    // Handle subnormals:
+     if (*exp) {
+         *mnt |= 1ULL << FP32_MANT_BITS;
+     } else {
+-        ++*exp;
+-        if ((mode & FPLIB_FZ) && *mnt) {
++        // Handle subnormals:
++        if (*mnt) {
++            if (mode & FPLIB_FZ) {
+             *flags |= FPLIB_IDC;
+             *mnt = 0;
++            } else {
++                ++*exp;
++            }
+         }
+     }
+ }
+@@ -429,18 +440,23 @@ static inline void
+ fp64_unpack(int *sgn, int *exp, uint64_t *mnt, uint64_t x, int mode,
+             int *flags)
+ {
++
++
+     *sgn = x >> (FP64_BITS - 1);
+     *exp = FP64_EXP(x);
+     *mnt = FP64_MANT(x);
+ 
+-    // Handle subnormals:
+     if (*exp) {
+         *mnt |= 1ULL << FP64_MANT_BITS;
+     } else {
+-        ++*exp;
+-        if ((mode & FPLIB_FZ) && *mnt) {
++        // Handle subnormals:
++        if (*mnt) {
++            if (mode & FPLIB_FZ) {
+             *flags |= FPLIB_IDC;
+             *mnt = 0;
++            } else {
++                ++*exp;
++            }
+         }
+     }
+ }
+diff --git a/src/arch/arm/isa/formats/sve_2nd_level.isa b/src/arch/arm/isa/formats/sve_2nd_level.isa
+index c06d7f6a7b..53fd80d07d 100644
+--- a/src/arch/arm/isa/formats/sve_2nd_level.isa
++++ b/src/arch/arm/isa/formats/sve_2nd_level.isa
+@@ -32,8 +32,6 @@
+ // THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+-//
+-// Authors: Giacomo Gabrielli
+ 
+ /// @file
+ /// SVE 2nd-level decoder.
+@@ -2801,12 +2799,12 @@ namespace Aarch64
+             case 2:
+                 zm = (IntRegIndex) (uint8_t) bits(machInst, 18, 16);
+                 imm = bits(machInst, 20, 19);
+-                return new SveFcmlai<uint32_t>(machInst,
++                return new SveFcmlai<uint16_t>(machInst,
+                         zda, zn, zm, rot, imm);
+             case 3:
+                 zm = (IntRegIndex) (uint8_t) bits(machInst, 19, 16);
+                 imm = bits(machInst, 20);
+-                return new SveFcmlai<uint64_t>(machInst,
++                return new SveFcmlai<uint32_t>(machInst,
+                         zda, zn, zm, rot, imm);
+         }
+         return new Unknown64(machInst);
+@@ -3132,10 +3130,6 @@ namespace Aarch64
+         IntRegIndex rm = (IntRegIndex) (uint8_t) bits(machInst, 20, 16);
+         IntRegIndex pg = (IntRegIndex) (uint8_t) bits(machInst, 12, 10);
+ 
+-        if (rm == 0x1f) {
+-            return new Unknown64(machInst);
+-        }
+-
+         return decodeSveContigLoadSSInsts<SveContigFFLoadSS>(
+             bits(machInst, 24, 21), machInst, zt, pg, rn, rm, true);
+     }  // decodeSveContigFFLoadSS
+diff --git a/src/arch/arm/isa/insts/sve.isa b/src/arch/arm/isa/insts/sve.isa
+index c46a34da4e..cfc3074d44 100644
+--- a/src/arch/arm/isa/insts/sve.isa
++++ b/src/arch/arm/isa/insts/sve.isa
+@@ -32,10 +32,16 @@
+ // THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+-//
+-// Authors: Giacomo Gabrielli
+ 
+ // @file Definition of SVE instructions.
++// Added 3 new SVE patches:
++// 1) arch-arm: Fix Sve Fcmla indexed instruction, 
++//      https://gem5-review.googlesource.com/c/public/gem5/+/28227
++// 2) arch-arm: SVE instructions do not use AHP format,
++//    https://gem5-review.googlesource.com/c/public/gem5/+/28108
++// 3) arch-arm: Fix SVE indx inst by sizeof error and dest overwrite, 
++//      https://gem5-review.googlesource.com/c/public/gem5/+/28228
++//
+ 
+ output header {{
+ 
+@@ -1518,27 +1524,49 @@ let {{
+     # Generates definitions for SVE floating-point conversions (always
+     # unary, constructive, merging
+     def sveCvtInst(name, Name, opClass, types, op, direction=CvtDir.Narrow,
+-                   decoder='Generic'):
++                   decoder='Generic', signed=False):
+         global header_output, exec_output, decoders
++
++        if signed:
++            mask = "SElement msk = mask(sizeof(DElement)*8);"
++            assign_code = '''
++                int sign_bit = bits(destElem, sizeof(DElement)*8 -1);
++                AA64FpDest_x%(bigElemSuffix)s[i] =
++                                    sign_bit? (destElem|~msk): destElem;
++                          '''  % {
++               'bigElemSuffix': 's' if direction == CvtDir.Narrow else 'd'
++               }
++        else:
++            mask = "";
++            assign_code = '''
++                AA64FpDest_x%(bigElemSuffix)s[i] = destElem;
++            '''  % {
++               'bigElemSuffix': 's' if direction == CvtDir.Narrow else 'd'
++                   }
++
+         code = sveEnabledCheckCode + '''
+         unsigned eCount = ArmStaticInst::getCurSveVecLen<%(bigElemType)s>(
+                 xc->tcBase());
++        %(mask)s
+         for (unsigned i = 0; i < eCount; i++) {
+             SElement srcElem1 = AA64FpOp1_x%(bigElemSuffix)s[i] &
+                     mask(sizeof(SElement) * 8);
+             DElement destElem = 0;
+             if (GpOp_x%(bigElemSuffix)s[i]) {
+                 %(op)s
+-                AA64FpDest_x%(bigElemSuffix)s[i] = destElem;
++                %(assign)s;
+             } else {
+                 AA64FpDest_x%(bigElemSuffix)s[i] =
+                         AA64FpDestMerge_x%(bigElemSuffix)s[i];
+             }
+         }
+-        ''' % {'op': op,
+-               'bigElemType': 'SElement' if direction == CvtDir.Narrow
++        ''' % {'bigElemType': 'SElement' if direction == CvtDir.Narrow
+                                          else 'DElement',
+-               'bigElemSuffix': 's' if direction == CvtDir.Narrow else 'd'}
++               'op': op, 'mask': mask,
++               'bigElemSuffix': 's' if direction == CvtDir.Narrow else 'd',
++               'assign': assign_code
++               }
++
+         iop = InstObjParams(name, 'Sve' + Name, 'SveUnaryPredOp',
+                             {'code': code, 'op_class': opClass}, [])
+         header_output += SveWideningUnaryPredOpDeclare.subst(iop)
+@@ -1815,26 +1843,25 @@ let {{
+                 xc->tcBase());
+ 
+         // Number of elements in a 128 bit segment
+-        constexpr unsigned ePerSegment = 128 / sizeof(Element);
+-
+-        '''
++        constexpr unsigned ePerSegment = 16 / sizeof(Element);
+ 
+-        code += '''
++        ArmISA::VecRegContainer tmpC;
++        auto auxDest = tmpC.as<TPElem>();
+         for (unsigned i = 0; i < eCount; i++) {
+-                const auto segmentBase = i - i % ePerSegment;
+-                const auto segmentIdx = segmentBase + index;
+-
+-                const Element& srcElem1 = AA64FpOp1_x[i];
+-                const Element& srcElem2 = AA64FpOp2_x[segmentIdx];
+-                Element destElem = 0;
++            const auto segmentBase = i - i %% ePerSegment;
++            const auto segmentIdx = segmentBase + index;
+ 
+-        '''
++            const Element& srcElem1 = AA64FpOp1_x[i];
++            const Element& srcElem2 = AA64FpOp2_x[segmentIdx];
++            Element destElem = 0;
+ 
+-        code += '''
+-        %(op)s
+-        AA64FpDest_x[i] = destElem;
++            %(op)s
++            auxDest[i] = destElem;
+         }
+-        ''' % {'op': op}
++
++        for (unsigned i = 0; i < eCount; i++) {
++            AA64FpDest_x[i] = auxDest[i];
++        }''' % {'op':op}
+ 
+         baseClass = 'SveBinIdxUnpredOp'
+ 
+@@ -2047,8 +2074,10 @@ let {{
+                 xc->tcBase());
+ 
+         // Number of elements in a 128 bit segment
+-        constexpr unsigned ePerSegment = 128 / sizeof(Element);
++        constexpr unsigned ePerSegment = 16 / sizeof(Element);
+ 
++        ArmISA::VecRegContainer tmpC;
++        auto auxDest = tmpC.as<TPElem>();
+         for (unsigned i = 0; i < eCount; i++) {
+             const auto segmentBase = i - i % ePerSegment;
+             const auto segmentIdx = segmentBase + index;
+@@ -2057,10 +2086,13 @@ let {{
+             const Element& srcElem2 = AA64FpOp2_x[segmentIdx];
+             Element destElem = AA64FpDestMerge_x[i];
+         '''
+-
+         code += '''
+             %(op)s
+-            AA64FpDest_x[i] = destElem;
++            auxDest[i] = destElem;
++        }
++
++        for (unsigned i = 0; i < eCount; i++) {
++            AA64FpDest_x[i] = auxDest[i];
+         }''' % {'op': op}
+ 
+         iop = InstObjParams(name, 'Sve' + Name, 'SveBinIdxUnpredOp',
+@@ -2434,7 +2466,16 @@ let {{
+             elif destType == DstRegType.SimdFpScalar:
+                 code += ''' else {
+             AA64FpDest_x[0] = AA64FpDestMerge_x[0];
+-        }'''
++        }
++        '''
++        if destType == DstRegType.SimdFpScalar:
++            # This section will extend zeros to the simdFP scalar
++            # intructions for lasta/b and Clasta/b
++            code += '''
++                for (int i = 1; i < eCount; ++i) {
++                    AA64FpDest_x[i] = (Element)0x0;
++                }
++                '''
+         iop = InstObjParams(name, 'Sve' + Name, 'SveSelectOp',
+                             {'code': code, 'op_class': opClass,
+                              'isCond': 'true' if isCond else 'false',
+@@ -2736,6 +2777,7 @@ let {{
+         code = sveEnabledCheckCode + '''
+         unsigned eCount = ArmStaticInst::getCurSveVecLen<Element>(
+                 xc->tcBase());
++
+         ArmISA::VecRegContainer tmpVecC;
+         auto auxDest = tmpVecC.as<Element>();
+         int firstelem = -1, lastelem = -2;
+@@ -2951,7 +2993,7 @@ let {{
+                 if (sub_i) {
+                     elt2_i = fplibNeg<Element>(elt2_i);
+                 }
+-                fpscr =  (FPSCR) FpscrExc;
++                fpscr = FpscrExc & ~FpscrAhpMask;
+                 acc_r = fplibAdd<Element>(acc_r, elt2_i, fpscr);
+                 FpscrExc = fpscr;
+             }
+@@ -2959,7 +3001,7 @@ let {{
+                 if (sub_r) {
+                     elt2_r = fplibNeg<Element>(elt2_r);
+                 }
+-                fpscr =  (FPSCR) FpscrExc;
++                fpscr = FpscrExc & ~FpscrAhpMask;
+                 acc_i = fplibAdd<Element>(acc_i, elt2_r, fpscr);
+                 FpscrExc = fpscr;
+             }
+@@ -2986,14 +3028,17 @@ let {{
+         unsigned eCount = ArmStaticInst::getCurSveVecLen<Element>(
+                 xc->tcBase());'''
+         code += '''
+-        uint32_t sel_a = rot & 0x1;
++        uint32_t sel_a = bits(rot, 0);
+         uint32_t sel_b = sel_a ? 0 : 1;
+-        bool neg_i = (rot & 0x2) == 1;
+-        bool neg_r = (rot & 0x1) != (rot & 0x2);'''
++        bool neg_i = bits(rot, 1);
++        bool neg_r = bits(rot, 0) != bits(rot, 1);'''
+         if predType == PredType.NONE:
+             code += '''
+         uint32_t eltspersegment = 16 / (2 * sizeof(Element));'''
+         code += '''
++        ArmISA::VecRegContainer tmpC;
++        auto auxDest = tmpC.as<TPElem>();
++
+         for (int i = 0; i < eCount / 2; ++i) {'''
+         if predType == PredType.NONE:
+             code += '''
+@@ -3017,7 +3062,7 @@ let {{
+             if (neg_r) {
+                 elt2_a = fplibNeg<Element>(elt2_a);
+             }
+-            fpscr =  (FPSCR) FpscrExc;
++            fpscr = FpscrExc & ~FpscrAhpMask;
+             addend_r = fplibMulAdd<Element>(addend_r, elt1_a, elt2_a, fpscr);
+             FpscrExc = fpscr;'''
+         if predType != PredType.NONE:
+@@ -3030,16 +3075,21 @@ let {{
+             if (neg_i) {
+                 elt2_b = fplibNeg<Element>(elt2_b);
+             }
+-            fpscr =  (FPSCR) FpscrExc;
++            fpscr = FpscrExc & ~FpscrAhpMask;
+             addend_i = fplibMulAdd<Element>(addend_i, elt1_a, elt2_b, fpscr);
+             FpscrExc = fpscr;'''
+         if predType != PredType.NONE:
+             code += '''
+             }'''
+         code += '''
+-            AA64FpDest_x[2 * i] = addend_r;
+-            AA64FpDest_x[2 * i + 1] = addend_i;
+-        }'''
++            auxDest[2 * i] = addend_r;
++            auxDest[2 * i + 1] = addend_i;
++        }
++
++        for (unsigned i = 0; i < eCount; i++) {
++            AA64FpDest_x[i] = auxDest[i];
++        }
++        '''
+         iop = InstObjParams(name, 'Sve' + Name,
+                 'SveComplexIdxOp' if predType == PredType.NONE
+                                   else 'SveComplexOp',
+@@ -3468,7 +3518,7 @@ let {{
+     sveExtInst('ext', 'Ext', 'SimdAluOp')
+     # FABD
+     fpOp = '''
+-            FPSCR fpscr = (FPSCR) FpscrExc;
++            FPSCR fpscr = FpscrExc & ~FpscrAhpMask;
+             destElem = %s;
+             FpscrExc = fpscr;
+     '''
+@@ -3499,7 +3549,7 @@ let {{
+     sveBinInst('fadd', 'FaddUnpred', 'SimdFloatAddOp', floatTypes, faddCode)
+     # FADDA
+     fpAddaOp = '''
+-            FPSCR fpscr = (FPSCR) FpscrExc;
++            FPSCR fpscr = FpscrExc & ~FpscrAhpMask;
+             destElem = fplibAdd<Element>(destElem, srcElem1, fpscr);
+             FpscrExc = FpscrExc | fpscr;
+     '''
+@@ -3507,7 +3557,7 @@ let {{
+             fpAddaOp)
+     # FADDV
+     fpReduceOp = '''
+-            FPSCR fpscr = (FPSCR) FpscrExc;
++            FPSCR fpscr = FpscrExc & ~FpscrAhpMask;
+             destElem = fplib%s<Element>(srcElem1, srcElem2, fpscr);
+             FpscrExc = FpscrExc | fpscr;
+     '''
+@@ -3560,7 +3610,7 @@ let {{
+     sveCmpInst('fcmuo', 'Fcmuo', 'SimdFloatCmpOp', fpTypes, fcmuoCode)
+     # FCMLA (indexed)
+     sveComplexMulAddInst('fcmla', 'Fcmlai', 'SimdFloatMultAccOp',
+-            fpTypes[1:], predType = PredType.NONE)
++            fpTypes[:2], predType = PredType.NONE)
+     # FCMLA (vectors)
+     sveComplexMulAddInst('fcmla', 'Fcmlav', 'SimdFloatMultAccOp',
+             fpTypes, predType = PredType.MERGE)
+@@ -3589,7 +3639,7 @@ let {{
+                 'uint32_t, uint32_t',
+                 'uint64_t, uint32_t',
+                 'uint64_t, uint64_t'),
+-               fcvtzsCode, CvtDir.Narrow)
++               fcvtzsCode, CvtDir.Narrow, signed=True)
+     sveCvtInst('fcvtzs', 'FcvtzsWiden', 'SimdCvtOp',
+                ('uint16_t, uint32_t',
+                 'uint16_t, uint64_t',
+diff --git a/src/arch/arm/isa/templates/sve_mem.isa b/src/arch/arm/isa/templates/sve_mem.isa
+index 3085eca6d7..c565aab255 100644
+--- a/src/arch/arm/isa/templates/sve_mem.isa
++++ b/src/arch/arm/isa/templates/sve_mem.isa
+@@ -34,7 +34,9 @@
+ // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ //
+ // Authors: Giacomo Gabrielli
+-
++// ppetrak: Cherry pick:
++// ppetrak: https://gem5-review.googlesource.com/c/public/gem5/+/23525
++//
+ def template SveMemFillSpillOpDeclare {{
+     class %(class_name)s : public %(base_class)s
+     {
+@@ -314,7 +316,7 @@ def template SveLoadAndReplExecute {{
+         %(op_rd)s;
+         %(ea_code)s;
+ 
+-        MemElemType memData;
++        MemElemType memData = 0;
+ 
+         if (fault == NoFault) {
+             fault = readMemAtomic(xc, traceData, EA, memData,
+@@ -344,7 +346,7 @@ def template SveLoadAndReplInitiateAcc {{
+ 
+         %(ea_code)s;
+ 
+-        MemElemType memData;
++        MemElemType memData = 0;
+ 
+         if (fault == NoFault) {
+             fault = initiateMemRead(xc, traceData, EA, memData,
+@@ -368,7 +370,7 @@ def template SveLoadAndReplCompleteAcc {{
+         %(op_decl)s;
+         %(op_rd)s;
+ 
+-        MemElemType memData;
++        MemElemType memData = 0;
+         getMem(pkt, memData, traceData);
+ 
+         if (fault == NoFault) {
+@@ -597,7 +599,7 @@ def template SveGatherLoadMicroopInitiateAcc {{
+         %(op_rd)s;
+         %(ea_code)s;
+ 
+-        MemElemType memData;
++        MemElemType memData = 0;
+ 
+         int index = elemIndex;
+         if (%(pred_check_code)s) {
+@@ -663,7 +665,7 @@ def template SveScatterStoreMicroopExecute {{
+         %(op_rd)s;
+         %(ea_code)s;
+ 
+-        MemElemType memData;
++        MemElemType memData = 0;
+         %(memacc_code)s;
+ 
+         int index = elemIndex;
+@@ -693,7 +695,7 @@ def template SveScatterStoreMicroopInitiateAcc {{
+         %(op_rd)s;
+         %(ea_code)s;
+ 
+-        MemElemType memData;
++        MemElemType memData = 0;
+         %(memacc_code)s;
+ 
+         int index = elemIndex;
+diff --git a/src/arch/arm/miscregs.hh b/src/arch/arm/miscregs.hh
+index 3ce371bfe5..8f77eb691d 100644
+--- a/src/arch/arm/miscregs.hh
++++ b/src/arch/arm/miscregs.hh
+@@ -1887,10 +1887,12 @@ namespace ArmISA
+     // This mask selects bits of the FPSCR that actually go in the FpCondCodes
+     // integer register to allow renaming.
+     static const uint32_t FpCondCodesMask = 0xF0000000;
+-    // This mask selects the cumulative FP exception flags of the FPSCR.
+-    static const uint32_t FpscrExcMask = 0x0000009F;
+     // This mask selects the cumulative saturation flag of the FPSCR.
+     static const uint32_t FpscrQcMask = 0x08000000;
++    // This mask selects the AHP bit of the FPSCR.
++    static const uint32_t FpscrAhpMask = 0x04000000;
++    // This mask selects the cumulative FP exception flags of the FPSCR.
++    static const uint32_t FpscrExcMask = 0x0000009F;
+ 
+     /**
+      * Check for permission to read coprocessor registers.
+diff --git a/src/arch/generic/vec_reg.hh b/src/arch/generic/vec_reg.hh
+index aab307b42f..ab1631cc16 100644
+--- a/src/arch/generic/vec_reg.hh
++++ b/src/arch/generic/vec_reg.hh
+@@ -279,7 +279,10 @@ class VecRegContainer
+     static constexpr size_t SIZE = Sz;
+     using Container = std::array<uint8_t,Sz>;
+   private:
+-    Container container;
++    // patch: https://gem5-review.googlesource.com/c/public/gem5/+/27968
++    // 16-byte aligned to support 128bit element view
++    alignas(16) Container container;
++
+     using MyClass = VecRegContainer<SIZE>;
+ 
+   public:
+diff --git a/src/base/bitfield.hh b/src/base/bitfield.hh
+index f2893962c4..4c2221be4c 100644
+--- a/src/base/bitfield.hh
++++ b/src/base/bitfield.hh
+@@ -54,12 +54,17 @@
+ extern const uint8_t reverseLookUpTable[];
+ 
+ /**
+- * Generate a 64-bit mask of 'nbits' 1s, right justified.
++ * Generate a 64-bit mask of 'nbits' 1s, right justified. If a number of bits
++ * greater than 64 is given, it is truncated to 64.
++ *
++ * @param nbits The number of bits set in the mask.
++ * 
++ * patch: https://gem5-review.googlesource.com/c/public/gem5/+/27104
+  */
+ inline uint64_t
+ mask(int nbits)
+ {
+-    return (nbits == 64) ? (uint64_t)-1LL : (1ULL << nbits) - 1;
++    return (nbits >= 64) ? (uint64_t)-1LL : (1ULL << nbits) - 1;
+ }
+ 
+ /**
+diff --git a/src/base/statistics.cc b/src/base/statistics.cc
+index 5e6882c79a..c591ab64b0 100644
+--- a/src/base/statistics.cc
++++ b/src/base/statistics.cc
+@@ -398,6 +398,10 @@ void
+ HistStor::add(HistStor *hs)
+ {
+     int b_size = hs->size();
++    if (b_size != size()){
++        warn("Stats: This is about to explode for, hs_size = %d, size()=%d, name=%s\n",
++        b_size, size(), hs->m_info->name);
++    }
+     assert(size() == b_size);
+     assert(min_bucket == hs->min_bucket);
+ 
+diff --git a/src/base/statistics.hh b/src/base/statistics.hh
+index 07f2959954..af65903d31 100644
+--- a/src/base/statistics.hh
++++ b/src/base/statistics.hh
+@@ -1554,6 +1554,7 @@ class HistStor
+ 
+         Params() : DistParams(Hist), buckets(0) {}
+     };
++    Info *m_info;
+ 
+   private:
+     /** The minimum value to track. */
+@@ -1579,6 +1580,7 @@ class HistStor
+         : cvec(safe_cast<const Params *>(info->storageParams)->buckets)
+     {
+         reset(info);
++        m_info = info;
+     }
+ 
+     void grow_up();
+diff --git a/src/base/stats/group.cc b/src/base/stats/group.cc
+index b1504275a6..d7c244225e 100644
+--- a/src/base/stats/group.cc
++++ b/src/base/stats/group.cc
+@@ -93,6 +93,16 @@ Group::resetStats()
+         g.second->resetStats();
+ }
+ 
++void
++Group::preDumpStats()
++{
++    for (auto &g : mergedStatGroups)
++        g->preDumpStats();
++
++    for (auto &g : statGroups)
++        g.second->preDumpStats();
++}
++
+ void
+ Group::addStat(Stats::Info *info)
+ {
+diff --git a/src/base/stats/group.hh b/src/base/stats/group.hh
+index f65e46448c..96743a811b 100644
+--- a/src/base/stats/group.hh
++++ b/src/base/stats/group.hh
+@@ -127,6 +127,13 @@ class Group
+      */
+     virtual void resetStats();
+ 
++    /**
++     * Callback before stats are dumped. This can be overridden by
++     * objects that need to perform calculations in addition to the
++     * capabiltiies implemented in the stat framework.
++     */
++    virtual void preDumpStats();
++
+     /**
+      * Register a stat with this group. This method is normally called
+      * automatically when a stat is instantiated.
+diff --git a/src/cpu/minor/lsq.cc b/src/cpu/minor/lsq.cc
+index 1e5e89647b..0a4bb80790 100644
+--- a/src/cpu/minor/lsq.cc
++++ b/src/cpu/minor/lsq.cc
+@@ -142,10 +142,18 @@ LSQ::LSQRequest::containsAddrRangeOf(
+ LSQ::AddrRangeCoverage
+ LSQ::LSQRequest::containsAddrRangeOf(LSQRequestPtr other_request)
+ {
+-    return containsAddrRangeOf(request->getPaddr(), request->getSize(),
++    AddrRangeCoverage ret;
++    ret = containsAddrRangeOf(request->getPaddr(), request->getSize(),
+         other_request->request->getPaddr(), other_request->request->getSize());
++    /* If there is a strobe mask then store data forwarding might not be
++     * correct. Instead of checking enablemant of every byte we just fall back
++     * to PartialAddrRangeCoverage to prohibit store data forwarding */
++    if (ret == FullAddrRangeCoverage && !request->getByteEnable().empty())
++        ret = PartialAddrRangeCoverage;
++    return ret;
+ }
+ 
++
+ bool
+ LSQ::LSQRequest::isBarrier()
+ {
+@@ -1636,7 +1644,9 @@ LSQ::pushRequest(MinorDynInstPtr inst, bool isLoad, uint8_t *data,
+         addr, size, flags, cpu.dataMasterId(),
+         /* I've no idea why we need the PC, but give it */
+         inst->pc.instAddr(), amo_op);
+-    request->request->setByteEnable(byteEnable);
++    request->request->setByteEnable(
++        isAllActiveElement(byteEnable.cbegin(), byteEnable.cend()) ?
++        std::vector<bool>() : byteEnable);
+ 
+     requests.push(request);
+     inst->inLSQ = true;
+diff --git a/src/cpu/o3/decode_impl.hh b/src/cpu/o3/decode_impl.hh
+index 86f9339929..9f28dca07f 100644
+--- a/src/cpu/o3/decode_impl.hh
++++ b/src/cpu/o3/decode_impl.hh
+@@ -73,6 +73,8 @@ DefaultDecode<Impl>::DefaultDecode(O3CPU *_cpu, DerivO3CPUParams *params)
+              "\tincrease MaxWidth in src/cpu/o3/impl.hh\n",
+              decodeWidth, static_cast<int>(Impl::MaxWidth));
+ 
++    // ppetrak: Problem could arise when you have a higher decode with than fetch width?
++    //
+     // @todo: Make into a parameter
+     skidBufferMax = (fetchToDecodeDelay + 1) *  params->fetchWidth;
+     for (int tid = 0; tid < Impl::MaxThreads; tid++) {
+@@ -422,6 +424,7 @@ DefaultDecode<Impl>::skidInsert(ThreadID tid)
+ 
+     // @todo: Eventually need to enforce this by not letting a thread
+     // fetch past its skidbuffer
++    // ppetrak: TODO: This might need adjusting
+     assert(skidBuffer[tid].size() <= skidBufferMax);
+ }
+ 
+diff --git a/src/cpu/o3/lsq.hh b/src/cpu/o3/lsq.hh
+index cc14ae4231..133fee806e 100644
+--- a/src/cpu/o3/lsq.hh
++++ b/src/cpu/o3/lsq.hh
+@@ -622,6 +622,12 @@ class LSQ
+                     (isPartialFault() && isLoad()));
+         }
+ 
++        void
++        setStateToFault()
++        {
++            setState(State::Fault);
++        }
++
+         /**
+          * The LSQ entry is cleared
+          */
+diff --git a/src/cpu/o3/lsq_impl.hh b/src/cpu/o3/lsq_impl.hh
+index e885e61728..e2287f605a 100644
+--- a/src/cpu/o3/lsq_impl.hh
++++ b/src/cpu/o3/lsq_impl.hh
+@@ -720,9 +720,13 @@ LSQ<Impl>::pushRequest(const DynInstPtr& inst, bool isLoad, uint8_t *data,
+                     size, flags, data, res, amo_op);
+         }
+         assert(req);
+-        if (!byteEnable.empty()) {
++        if (!byteEnable.empty()  &&
++            isAllActiveElement(byteEnable.cbegin(), byteEnable.cend())) {
++            req->_byteEnable = std::vector<bool>();
++        } else {
+             req->_byteEnable = byteEnable;
+         }
++
+         inst->setRequest();
+         req->taskId(cpu->taskId());
+ 
+@@ -1152,13 +1156,41 @@ LSQ<Impl>::SingleDataRequest::isCacheBlockHit(Addr blockAddr, Addr blockMask)
+     return ( (LSQRequest::_requests[0]->getPaddr() & blockMask) == blockAddr);
+ }
+ 
++/**
++ * Caches may probe into the load-store queue to enforce memory ordering
++ * guarantees. This method supports probes by providing a mechanism to compare
++ * snoop messages with requests tracked by the load-store queue.
++ *
++ * Consistency models must enforce ordering constraints. TSO, for instance,
++ * must prevent memory reorderings except stores which are reordered after
++ * loads. The reordering restrictions negatively impact performance by
++ * cutting down on memory level parallelism. However, the core can regain
++ * performance by generating speculative loads. Speculative loads may issue
++ * without affecting correctness if precautions are taken to handle invalid
++ * memory orders. The load queue must squash under memory model violations.
++ * Memory model violations may occur when block ownership is granted to
++ * another core or the block cannot be accurately monitored by the load queue.
++ */
++
+ template<class Impl>
+ bool
+ LSQ<Impl>::SplitDataRequest::isCacheBlockHit(Addr blockAddr, Addr blockMask)
+ {
+     bool is_hit = false;
+     for (auto &r: _requests) {
+-        if ((r->getPaddr() & blockMask) == blockAddr) {
++        /**
++	    * The load-store queue handles partial faults which complicates this
++        * method. Physical addresses must be compared between requests and
++        * snoops. Some requests will not have a valid physical address, since
++        * partial faults may have outstanding translations. Therefore, the
++        * existence of a valid request address must be checked before
++        * comparing block hits. We assume no pipeline squash is needed if a
++        * valid request address does not exist.
++        * https://gem5-review.googlesource.com/c/public/gem5/+/22283/4
++        */
++
++        //if ( (r->getPaddr() & blockMask) == blockAddr) {
++        if (r->hasPaddr() && (r->getPaddr() & blockMask) == blockAddr) {
+             is_hit = true;
+             break;
+         }
+diff --git a/src/cpu/o3/lsq_unit.hh b/src/cpu/o3/lsq_unit.hh
+index cd512ced7b..04f4ad3812 100644
+--- a/src/cpu/o3/lsq_unit.hh
++++ b/src/cpu/o3/lsq_unit.hh
+@@ -209,6 +209,14 @@ class LSQUnit
+     };
+     using LQEntry = LSQEntry;
+ 
++    /** Coverage of one address range with another */
++    enum AddrRangeCoverage
++    {
++        PartialAddrRangeCoverage, /* Two ranges partly overlap */
++        FullAddrRangeCoverage, /* One range fully covers another */
++        NoAddrRangeCoverage /* Two ranges are disjoint */
++    };
++
+   public:
+     using LoadQueue = CircularQueue<LQEntry>;
+     using StoreQueue = CircularQueue<SQEntry>;
+@@ -618,6 +626,17 @@ LSQUnit<Impl>::read(LSQRequest *req, int load_idx)
+     load_req.setRequest(req);
+     assert(load_inst);
+ 
++    // ppetrak: Warning: The following assert does trigger.
++    // Fault LSQUnit<Impl>::read(LSQUnit<Impl>::LSQRequest*, int)
++    // [with Impl = O3CPUImpl; Fault = std::shared_ptr<FaultBase>;
++    // LSQUnit<Impl>::LSQRequest = LSQ<O3CPUImpl>::LSQRequest]:
++    //  Assertion `!load_inst->isExecuted()' failed.
++    // 
++    // There is discussion regarding this in:
++    // https://www.mail-archive.com/gem5-users@gem5.org/msg16850.html
++    // We can check public repository for possible patches
++    // Have not found anything up to October-16th 2019
++    // ppetrak: Update: patch v3 fixes this
+     assert(!load_inst->isExecuted());
+ 
+     // Make sure this isn't a strictly ordered load
+@@ -707,6 +726,8 @@ LSQUnit<Impl>::read(LSQRequest *req, int load_idx)
+             bool lower_load_has_store_part = req_s < st_e;
+             bool upper_load_has_store_part = req_e > st_s;
+ 
++            AddrRangeCoverage coverage = NoAddrRangeCoverage;
++
+             // If the store entry is not atomic (atomic does not have valid
+             // data), the store has all of the data needed, and
+             // the load is not LLSC, then
+@@ -714,7 +735,36 @@ LSQUnit<Impl>::read(LSQRequest *req, int load_idx)
+             if (!store_it->instruction()->isAtomic() &&
+                 store_has_lower_limit && store_has_upper_limit &&
+                 !req->mainRequest()->isLLSC()) {
++                // If the store's data has all of the data needed and the load
++                // isn't LLSC then we can forward. Execept if the store request
++                // has a byte strobe mask. In the latter case, we fall back
++                // to PartialAddrRangeCoverage to disable forward.
++                const auto& store_req = store_it->request()->mainRequest();
++                if (store_req->getByteEnable().empty())
++                    coverage = FullAddrRangeCoverage;
++                else
++                    coverage = PartialAddrRangeCoverage;
++            } else if (
++                // This is the partial store-load forwarding case where a store
++                // has only part of the load's data and the load isn't LLSC
++                (!req->mainRequest()->isLLSC() &&
++                 ((store_has_lower_limit && lower_load_has_store_part) ||
++                  (store_has_upper_limit && upper_load_has_store_part) ||
++                  (lower_load_has_store_part && upper_load_has_store_part))) ||
++                // The load is LLSC, and the store has all or part of the
++                // load's data
++                (req->mainRequest()->isLLSC() &&
++                 ((store_has_lower_limit || upper_load_has_store_part) &&
++                  (store_has_upper_limit || lower_load_has_store_part))) ||
++                // The store entry is atomic and has all or part of the load's
++                // data
++                (store_it->instruction()->isAtomic() &&
++                 ((store_has_lower_limit || upper_load_has_store_part) &&
++                  (store_has_upper_limit || lower_load_has_store_part)))) {
++                coverage = PartialAddrRangeCoverage;
++            }
+ 
++            if (coverage == FullAddrRangeCoverage) {
+                 // Get shift amount for offset into the store's data.
+                 int shift_amt = req->mainRequest()->getVaddr() -
+                     store_it->instruction()->effAddr;
+@@ -761,24 +811,7 @@ LSQUnit<Impl>::read(LSQRequest *req, int load_idx)
+                 ++lsqForwLoads;
+ 
+                 return NoFault;
+-            } else if (
+-                // This is the partial store-load forwarding case where a store
+-                // has only part of the load's data and the load isn't LLSC
+-                (!req->mainRequest()->isLLSC() &&
+-                 ((store_has_lower_limit && lower_load_has_store_part) ||
+-                  (store_has_upper_limit && upper_load_has_store_part) ||
+-                  (lower_load_has_store_part && upper_load_has_store_part))) ||
+-                // The load is LLSC, and the store has all or part of the
+-                // load's data
+-                (req->mainRequest()->isLLSC() &&
+-                 ((store_has_lower_limit || upper_load_has_store_part) &&
+-                  (store_has_upper_limit || lower_load_has_store_part))) ||
+-                // The store entry is atomic and has all or part of the load's
+-                // data
+-                (store_it->instruction()->isAtomic() &&
+-                 ((store_has_lower_limit || upper_load_has_store_part) &&
+-                  (store_has_upper_limit || lower_load_has_store_part)))) {
+-
++            } else if (coverage == PartialAddrRangeCoverage) {
+                 // If it's already been written back, then don't worry about
+                 // stalling on it.
+                 if (store_it->completed()) {
+diff --git a/src/cpu/o3/lsq_unit_impl.hh b/src/cpu/o3/lsq_unit_impl.hh
+index c2483d5674..107e600ea8 100644
+--- a/src/cpu/o3/lsq_unit_impl.hh
++++ b/src/cpu/o3/lsq_unit_impl.hh
+@@ -426,6 +426,11 @@ LSQUnit<Impl>::checkSnoop(PacketPtr pkt)
+ 
+                 // Mark the load for re-execution
+                 ld_inst->fault = std::make_shared<ReExec>();
++
++                //ppetrak: from patch:https://gem5-review.googlesource.com/c/public/gem5/+/21819
++                req->setStateToFault();
++
++
+             } else {
+                 DPRINTF(LSQUnit, "HitExternal Snoop for addr %#x [sn:%lli]\n",
+                         pkt->getAddr(), ld_inst->seqNum);
+diff --git a/src/cpu/utils.hh b/src/cpu/utils.hh
+index 4c13181748..dd1b94f0cc 100644
+--- a/src/cpu/utils.hh
++++ b/src/cpu/utils.hh
+@@ -93,4 +93,16 @@ isAnyActiveElement(const std::vector<bool>::const_iterator& it_start,
+     return (it_tmp != it_end);
+ }
+ 
++/**
++ * Test if all elements are active in an enablement range
++ */
++inline bool
++isAllActiveElement(const std::vector<bool>::const_iterator& it_start,
++                   const std::vector<bool>::const_iterator& it_end)
++{
++    auto it_tmp = it_start;
++    for (;it_tmp != it_end && (*it_tmp); ++it_tmp);
++    return (it_tmp == it_end);
++}
++
+ #endif // __CPU_UTILS_HH__
+diff --git a/src/mem/DRAMCtrl.py b/src/mem/DRAMCtrl.py
+index 14db3d3c9d..f52aeab01b 100644
+--- a/src/mem/DRAMCtrl.py
++++ b/src/mem/DRAMCtrl.py
+@@ -643,6 +643,105 @@ class DDR4_2400_16x4(DRAMCtrl):
+     VDD = '1.2V'
+     VDD2 = '2.5V'
+ 
++#####
++### HBM2 model provided by gem5-X (version: Apr 22 2020)
++####
++# A single HBM2 x128 interface (one command and address bus), with
++# default timings based on data publically released
++# ("HBM: Memory Solution for High Performance Processors", MemCon, 2014),
++# IDD measurement values, and by extrapolating data from other classes.
++# Architecture values based on published HBM spec
++# A 4H stack is defined, 2Gb per die for a total of 1GB of memory.
++class HBM2_2000_4H_1x128(DRAMCtrl):
++    # HBM gen2 supports up to 8 128-bit physical channels
++    # Configuration defines a single channel, with the capacity
++    # set to (full_ stack_capacity / 8) based on 2Gb dies
++    # To use all 8 channels, set 'channels' parameter to 8 in
++    # system configuration
++
++    # 128-bit interface legacy mode
++    device_bus_width = 128
++
++    write_buffer_size = 128
++    read_buffer_size = 128
++
++    # HBM supports BL4 and BL2 (legacy mode only)
++    burst_length = 4
++
++    # size of channel in bytes, 4H stack of 2Gb dies is 1GB per stack;
++    # with 8 channels, 128MB per channel
++    device_size = '128MB'
++
++    device_rowbuffer_size = '2kB'
++
++    # 1x128 configuration
++    devices_per_rank = 1
++
++    # HBM does not have a CS pin; set rank to 1
++    ranks_per_channel = 1
++
++    # HBM has 8 or 16 banks depending on capacity
++    # 2Gb dies have 8 banks
++    banks_per_rank = 16
++
++    # depending on frequency, bank groups may be required
++    # will always have 4 bank groups when enabled
++    # current specifications do not define the minimum frequency for
++    # bank group architecture
++    # setting bank_groups_per_rank to 0 to disable until range is defined
++    bank_groups_per_rank = 4
++
++    # 1.2GHz for 2.4Gbps DDR data rate
++    tCK = '0.833ns'
++
++    # use values from IDD measurement in JEDEC spec
++    # use tRP value for tRCD and tCL similar to other classes
++    tRP = '14ns'
++    tRCD = '14ns'
++    tCL = '14ns'
++    tRAS = '33ns'
++
++    # BL2 and BL4 supported, default to BL4
++    # DDR @ 500 MHz means 4 * 2ns / 2 = 4ns
++    tBURST = '1.666ns'
++    tCCD_L = '3.332ns'
++    tCCD_L_WR = '3.332ns'
++
++    # value for 2Gb device from JEDEC spec
++    tRFC = '160ns'
++
++    # value for 2Gb device from JEDEC spec
++    tREFI = '3.9us'
++
++    # extrapolate the following from LPDDR configs, using ns values
++    # to minimize burst length, prefetch differences
++    tWR = '8ns'
++    tRTP = '3.5ns'
++    tWTR = '3ns'
++
++    # start with 2 cycles turnaround, similar to other memory classes
++    # could be more with variations across the stack
++    tRTW = '1.666ns'
++
++    # single rank device, set to 0
++    tCS = '0ns'
++
++    # from MemCon example, tRRD is 4ns with 2ns tCK
++    tRRD = '1.666ns'
++    tRRD_L = '1.666ns'
++
++    # from MemCon example, tFAW is 30ns with 2ns tCK
++    tXAW = '12.5ns'
++    activation_limit = 4
++
++    # 4tCK
++    tXP = '3.332ns'
++
++    # start with tRFC + tXP -> 160ns + 8ns = 168ns
++    tXS = '160ns'
++
++###
++
+ # A single DDR4-2400 x64 channel (one command and address bus), with
+ # timings based on a DDR4-2400 8 Gbit datasheet (Micron MT40A1G8)
+ # in an 8x8 configuration.
+diff --git a/src/mem/abstract_mem.cc b/src/mem/abstract_mem.cc
+index 6870ba38fc..3740dcd59c 100644
+--- a/src/mem/abstract_mem.cc
++++ b/src/mem/abstract_mem.cc
+@@ -396,7 +396,14 @@ AbstractMemory::access(PacketPtr pkt)
+         }
+         if (pmemAddr) {
+             pkt->setData(hostAddr);
++            //
++            // ppetrak: added this from the similar write debug print
++            // check again!
++            //
++            DPRINTF(MemoryAccess, "%s read %i bytes from address %x\n",
++                            __func__, pkt->getSize(), pkt->getAddr());
+         }
++
+         TRACE_PACKET(pkt->req->isInstFetch() ? "IFetch" : "Read");
+         numReads[pkt->req->masterId()]++;
+         bytesRead[pkt->req->masterId()] += pkt->getSize();
+diff --git a/src/mem/packet.hh b/src/mem/packet.hh
+index 130cc41adc..e3c4696561 100644
+--- a/src/mem/packet.hh
++++ b/src/mem/packet.hh
+@@ -1092,7 +1092,8 @@ class Packet : public Printable
+     getPtr()
+     {
+         assert(flags.isSet(STATIC_DATA|DYNAMIC_DATA));
+-        assert(!isMaskedWrite());
++        //ppetrak: crashes in SVE code? check again
++        //assert(!isMaskedWrite());
+         return (T*)data;
+     }
+ 
+diff --git a/src/mem/packet_queue.cc b/src/mem/packet_queue.cc
+index dd1ba3dcde..0eea74d3b8 100644
+--- a/src/mem/packet_queue.cc
++++ b/src/mem/packet_queue.cc
+@@ -118,8 +118,13 @@ PacketQueue::schedSendTiming(PacketPtr pkt, Tick when)
+ 
+     // add a very basic sanity check on the port to ensure the
+     // invisible buffer is not growing beyond reasonable limits
+-    if (!_disableSanityCheck && transmitList.size() > 100) {
+-        panic("Packet queue %s has grown beyond 100 packets\n",
++
++    // ppetrak: Increased this to 200 (from 100)
++    // See related link:
++    // https://www.mail-archive.com/gem5-users@gem5.org/msg11094.html
++    //
++    if (!_disableSanityCheck && transmitList.size() > 200) {
++        panic("Packet queue %s has grown beyond 200 packets\n",
+               name());
+     }
+ 
+diff --git a/src/mem/ruby/SConscript b/src/mem/ruby/SConscript
+index 450a4bfcaa..d53cfdd522 100644
+--- a/src/mem/ruby/SConscript
++++ b/src/mem/ruby/SConscript
+@@ -45,6 +45,7 @@ if env['PROTOCOL'] == 'None':
+     Return()
+ 
+ DebugFlag('ProtocolTrace')
++DebugFlag('ResetTrace')
+ DebugFlag('RubyCache')
+ DebugFlag('RubyCacheTrace')
+ DebugFlag('RubyDma')
+@@ -59,6 +60,9 @@ DebugFlag('RubySystem')
+ DebugFlag('RubyTester')
+ DebugFlag('RubyStats')
+ DebugFlag('RubyResourceStalls')
++DebugFlag('RubyNetConnections') #Custom flag ppetrak
++DebugFlag('RubyForthSequencer') #Custom flag ppetrak
++DebugFlag('RubyNetInjectedPackets') #Custom flag ppetrak
+ 
+ CompoundFlag('Ruby', [ 'RubyQueue', 'RubyNetwork', 'RubyTester',
+     'RubyGenerated', 'RubySlicc', 'RubySystem', 'RubyCache',
+diff --git a/src/mem/ruby/common/DataBlock.cc b/src/mem/ruby/common/DataBlock.cc
+index a4d7f4916b..dd28f80ad4 100644
+--- a/src/mem/ruby/common/DataBlock.cc
++++ b/src/mem/ruby/common/DataBlock.cc
+@@ -111,6 +111,16 @@ DataBlock::setData(const uint8_t *data, int offset, int len)
+     memcpy(&m_data[offset], data, len);
+ }
+ 
++//patch: maskedWrites
++//patch: https://gem5-review.googlesource.com/c/public/gem5/+/41134
++void
++DataBlock::setData(PacketPtr pkt)
++{
++    int offset = getOffset(pkt->getAddr());
++    assert(offset + pkt->getSize() <= RubySystem::getBlockSizeBytes());
++    pkt->writeData(&m_data[offset]);
++}
++
+ DataBlock &
+ DataBlock::operator=(const DataBlock & obj)
+ {
+diff --git a/src/mem/ruby/common/DataBlock.hh b/src/mem/ruby/common/DataBlock.hh
+index d52b6fa725..d56cea0a40 100644
+--- a/src/mem/ruby/common/DataBlock.hh
++++ b/src/mem/ruby/common/DataBlock.hh
+@@ -35,6 +35,8 @@
+ #include <iomanip>
+ #include <iostream>
+ 
++#include "mem/packet.hh"
++
+ class WriteMask;
+ 
+ class DataBlock
+@@ -63,6 +65,7 @@ class DataBlock
+     uint8_t *getDataMod(int offset);
+     void setByte(int whichByte, uint8_t data);
+     void setData(const uint8_t *data, int offset, int len);
++    void setData(PacketPtr pkt);
+     void copyPartial(const DataBlock &dblk, int offset, int len);
+     void copyPartial(const DataBlock &dblk, const WriteMask &mask);
+     void atomicPartial(const DataBlock & dblk, const WriteMask & mask);
+diff --git a/src/mem/ruby/network/Network.cc b/src/mem/ruby/network/Network.cc
+index 57834f2e2a..4ff2d74020 100644
+--- a/src/mem/ruby/network/Network.cc
++++ b/src/mem/ruby/network/Network.cc
+@@ -194,7 +194,7 @@ Network::setFromNetQueue(NodeID id, bool ordered, int network_num,
+     }
+     m_fromNetQueues[id][network_num] = b;
+ }
+-
++// NOTE:
+ NodeID
+ Network::addressToNodeID(Addr addr, MachineType mtype)
+ {
+diff --git a/src/mem/ruby/network/Topology.cc b/src/mem/ruby/network/Topology.cc
+index 6da251e0bf..3b94914e91 100644
+--- a/src/mem/ruby/network/Topology.cc
++++ b/src/mem/ruby/network/Topology.cc
+@@ -37,6 +37,8 @@
+ #include "mem/ruby/network/Network.hh"
+ #include "mem/ruby/slicc_interface/AbstractController.hh"
+ 
++#include "debug/RubyNetConnections.hh"
++
+ using namespace std;
+ 
+ const int INFINITE_LATENCY = 10000; // Yes, this is a big hack
+@@ -57,7 +59,8 @@ Topology::Topology(uint32_t num_routers,
+ {
+     // Total nodes/controllers in network
+     assert(m_nodes > 1);
+-
++    DPRINTF(RubyNetConnections, "num_routers = %d, m_nodes = %d\n",
++            num_routers, m_nodes);
+     // analyze both the internal and external links, create data structures.
+     // The python created external links are bi-directional,
+     // and the python created internal links are uni-directional.
+@@ -76,6 +79,12 @@ Topology::Topology(uint32_t num_routers,
+         int ext_idx1 = machine_base_idx + abs_cntrl->getVersion();
+         int ext_idx2 = ext_idx1 + m_nodes;
+         int int_idx = router->params()->router_id + 2*m_nodes;
++        DPRINTF(RubyNetConnections,
++                "1) ExtlinkAnalysis:%p Ext -> Router: [%d] -> [%d]\n",
++                ext_link, ext_idx1, int_idx - 2*m_nodes);
++        DPRINTF(RubyNetConnections,
++                "2) ExtlinkAnalysis:%p Router to Ext: [%d] -> [%d]\n",
++                ext_link, int_idx - 2 * m_nodes, ext_idx2);
+ 
+         // create the internal uni-directional links in both directions
+         // ext to int
+@@ -99,6 +108,9 @@ Topology::Topology(uint32_t num_routers,
+ 
+         int src = router_src->params()->router_id + 2*m_nodes;
+         int dst = router_dst->params()->router_id + 2*m_nodes;
++        DPRINTF(RubyNetConnections,
++                "3) Add int_link: src[(%d) %d], dst [(%d) %d]\n",
++                src, src-2*m_nodes, dst, dst - 2*m_nodes);
+ 
+         // create the internal uni-directional link from src to dst
+         addLink(src, dst, int_link, src_outport, dst_inport);
+diff --git a/src/mem/ruby/network/garnet2.0/GarnetNetwork.cc b/src/mem/ruby/network/garnet2.0/GarnetNetwork.cc
+index 5fa7644579..c6fe9e228c 100644
+--- a/src/mem/ruby/network/garnet2.0/GarnetNetwork.cc
++++ b/src/mem/ruby/network/garnet2.0/GarnetNetwork.cc
+@@ -34,7 +34,8 @@
+ #include "mem/ruby/network/garnet2.0/GarnetNetwork.hh"
+ 
+ #include <cassert>
+-
++#include <stdio.h>
++#include "debug/RubyNetConnections.hh"
+ #include "base/cast.hh"
+ #include "base/stl_helpers.hh"
+ #include "mem/ruby/common/NetDest.hh"
+@@ -47,6 +48,9 @@
+ #include "mem/ruby/network/garnet2.0/Router.hh"
+ #include "mem/ruby/system/RubySystem.hh"
+ 
++#include "mem/ruby/protocol/CoherenceRequestType.hh"
++#include "mem/ruby/protocol/CoherenceResponseType.hh"
++
+ using namespace std;
+ using m5::stl_helpers::deletePointers;
+ 
+@@ -70,9 +74,12 @@ GarnetNetwork::GarnetNetwork(const Params *p)
+     if (m_enable_fault_model)
+         fault_model = p->fault_model;
+ 
+-    m_vnet_type.resize(m_virtual_networks);
++    assert (m_virtual_networks % MAX_CC_PROTOCOL_VNET == 0);
+ 
++    m_vnet_type.resize(m_virtual_networks);
++    //ppetrak: Setting VNET type
+     for (int i = 0 ; i < m_virtual_networks ; i++) {
++        // TODO: Check if we also need to define m_vnet_type somehow
+         if (m_vnet_type_names[i] == "response")
+             m_vnet_type[i] = DATA_VNET_; // carries data (and ctrl) packets
+         else
+@@ -96,13 +103,16 @@ GarnetNetwork::GarnetNetwork(const Params *p)
+         m_nis.push_back(ni);
+         ni->init_net_ptr(this);
+     }
++
++    m_noc_latency_map = new std::map<src_dst_ni_key, noc_latency_struct*>[m_virtual_networks];
++
+ }
+ 
+ void
+ GarnetNetwork::init()
+ {
+     Network::init();
+-
++     //ppetrak:NOTE: Associate the NI[i] to the m_nodes index...
+     for (int i=0; i < m_nodes; i++) {
+         m_nis[i]->addNode(m_toNetQueues[i], m_fromNetQueues[i]);
+     }
+@@ -177,6 +187,15 @@ GarnetNetwork::makeExtInLink(NodeID src, SwitchID dest, BasicLink* link,
+     PortDirection dst_inport_dirn = "Local";
+     m_routers[dest]->addInPort(dst_inport_dirn, net_link, credit_link);
+     m_nis[src]->addOutPort(net_link, credit_link, dest);
++
++    /*
++    ppetrak:
++    This code is no longer valid since now we got several routers per NI
++    DPRINTF(RubyNetConnections,
++        "GarnetNet: makeExtInLink: SRC_ID[%u], ni_router_id[%u],
++        net_link[%d], dest_Router[%u]\n",
++        src, m_nis[src]->get_router_id(), net_link->get_id(), dest );
++    */
+ }
+ 
+ /*
+@@ -208,6 +227,10 @@ GarnetNetwork::makeExtOutLink(SwitchID src, NodeID dest, BasicLink* link,
+                                routing_table_entry,
+                                link->m_weight, credit_link);
+     m_nis[dest]->addInPort(net_link, credit_link);
++
++    DPRINTF(RubyNetConnections, "GarnetNet: makeExtOutLink (link from Net "
++            "to NI): srcRouter[%u], NI[%u], net_link[%d]\n",
++            src, dest, net_link->get_id() );
+ }
+ 
+ /*
+@@ -245,10 +268,12 @@ GarnetNetwork::getNumRouters()
+ }
+ 
+ // Get ID of router connected to a NI.
++// ppetrak: A NI can now be connected to multiple Routers (of different layer),
++// so we have to take into account the layer number
+ int
+-GarnetNetwork::get_router_id(int ni)
++GarnetNetwork::get_router_id(int ni, int layer)
+ {
+-    return m_nis[ni]->get_router_id();
++    return m_nis[ni]->get_router_id(layer);
+ }
+ 
+ void
+@@ -394,6 +419,129 @@ GarnetNetwork::regStats()
+         .flags(Stats::pdf | Stats::total | Stats::nozero | Stats::oneline)
+         ;
+ }
++double
++static get_sorted_vector_median(std::vector<Cycles> const &vec){
++    if (vec.size() == 0)
++        return 0.0;
++
++    if (vec.size() % 2 == 0){
++        return (double)(vec[vec.size()/2] + vec[vec.size()/2 - 1]) / 2.0;
++    }else{
++        return (double)(vec[vec.size()/2]);
++    }
++}
++
++void
++GarnetNetwork::noc_latencies_collate(){
++ // Do not delete the NoC Lat map contents just reset stats
++    DPRINTF(RubyNetConnections, "Begin Stats\n");
++    for (int i = 0; i < m_virtual_networks; i++ ){
++        map<src_dst_ni_key, noc_latency_struct*>::iterator it;
++        for (it = m_noc_latency_map[i].begin(); it != m_noc_latency_map[i].end(); ++it ){
++            noc_latency_struct *nls = it->second;
++            if(nls){
++                // There are cases, in which a packet is initiated from an IO controller / DMA controller / non-numbered Directory Controller (used during booting?)
++                // In these cases, there is no outNode_ptr MessageBuffer from the NI to the Protocol.
++                // Additionally, there is no way to know the Protocol Controller from the inNode_ptr MessageBuffer (we cannot use getConsumer in this case).
++                // Therefore we set the source IP of this kind of packets to "Other"
++
++                // assert(m_nis[nls->src_ni]->get_outNode_ptr(nls->vnet));
++                // assert(m_nis[nls->dst_ni]->get_outNode_ptr(nls->vnet));
++                // assert(m_nis[nls->src_ni]->get_outNode_ptr(nls->vnet)->getConsumer());
++                // assert(m_nis[nls->dst_ni]->get_outNode_ptr(nls->vnet)->getConsumer());
++
++                if (nls->total_flits > 0){
++
++//#define PRINT_PACKETS_LAT
++#ifdef PRINT_PACKETS_LAT
++                    ///
++                    std::string src_str_1;
++                    std::stringstream ss_1;
++                    std::string v1_str, v2_str;
++
++                    for (int i = 0; i < nls->noc_latencies[NOC_QUEUE_LAT_INDEX].size(); i++ ){
++                        v1_str += std::to_string(nls->noc_latencies[NOC_QUEUE_LAT_INDEX][i]) + ",";
++                        v2_str += std::to_string(nls->noc_latencies[NOC_NET_LAT_INDEX][i]) + ",";
++                    }
++
++                    if(!m_nis[nls->src_ni]->get_outNode_ptr(nls->vnet)){
++                        src_str_1 = "Other";
++                    }else{
++                        m_nis[nls->src_ni]->get_outNode_ptr(nls->vnet)->getConsumer()->print(ss_1);
++                        src_str_1 = ss_1.str();
++                    }
++                    DPRINTF(RubyNetConnections, "%svnet:%d, %s->%s, QUEUE: %s\n",
++                        (nls->total_flits < 50)?"DISC,":"", // Filter out flows with few packets
++                        nls->vnet,
++                        src_str_1, *m_nis[nls->dst_ni]->get_outNode_ptr(nls->vnet)->getConsumer(),
++                        v1_str
++                    );
++                    DPRINTF(RubyNetConnections, "%svnet:%d, %s->%s, NET: %s\n",
++                        (nls->total_flits < 50)?"DISC,":"", // Filter out flows with few packets
++                        nls->vnet,
++                        src_str_1, *m_nis[nls->dst_ni]->get_outNode_ptr(nls->vnet)->getConsumer(),
++                        v2_str
++                    );
++#endif
++                    ///
++                    std::sort ( nls->noc_latencies[NOC_QUEUE_LAT_INDEX].begin(), nls->noc_latencies[NOC_QUEUE_LAT_INDEX].end());
++                    std::sort ( nls->noc_latencies[NOC_NET_LAT_INDEX].begin(), nls->noc_latencies[NOC_NET_LAT_INDEX].end());
++
++                    double queue_median = get_sorted_vector_median(nls->noc_latencies[NOC_QUEUE_LAT_INDEX]);
++                    double net_median = get_sorted_vector_median(nls->noc_latencies[NOC_NET_LAT_INDEX]);
++
++                    std::string src_str;
++                    std::stringstream ss;
++                    if(!m_nis[nls->src_ni]->get_outNode_ptr(nls->vnet)){
++                        src_str = "Other";
++                    }else{
++                        m_nis[nls->src_ni]->get_outNode_ptr(nls->vnet)->getConsumer()->print(ss);
++                        src_str = ss.str();
++                    }
++                    DPRINTF(RubyNetConnections, "%svnet:%d, %s->%s, NI[%d->%d], Rtr[%d->%d], hops[%d], queue_AvgMinMaxMed[%.2f/%ld/%ld/%.2f], net_AvgMinMaxMed[%.2f/%ld/%ld/%.2f], flits:%ld\n",
++                        (nls->total_flits < 50)?"DISC,":"", // Filter out flows with few packets
++                        nls->vnet,
++                        src_str, *m_nis[nls->dst_ni]->get_outNode_ptr(nls->vnet)->getConsumer(),
++                        nls->src_ni, nls->dst_ni,
++                        nls->src_router, nls->dst_router,
++                        nls->hops,
++                        (double) nls->queue_lat / (double) nls->total_flits,
++                        nls->noc_latencies[NOC_QUEUE_LAT_INDEX][0], //MIN
++                        nls->noc_latencies[NOC_QUEUE_LAT_INDEX][nls->noc_latencies[NOC_QUEUE_LAT_INDEX].size()-1], //MAX
++                        queue_median,
++                        (double) nls->net_lat / (double) nls->total_flits,
++                        nls->noc_latencies[NOC_NET_LAT_INDEX][0],  //MIN
++                        nls->noc_latencies[NOC_NET_LAT_INDEX][nls->noc_latencies[NOC_NET_LAT_INDEX].size()-1], //MAX
++                        net_median,
++                        nls->total_flits
++                    );
++                    std::string str = "";
++
++                    if(nls->requests_map.size() > 0){
++                        for (auto& it : nls->requests_map){
++                            str += "[" + CoherenceRequestType_to_string((CoherenceRequestType)it.first)+" : " + std::to_string(it.second) +"]";
++                        }
++                        DPRINTF(RubyNetConnections, "vnet:%d, %s->%s, REQ: %s\n",
++                            nls->vnet, src_str, *m_nis[nls->dst_ni]->get_outNode_ptr(nls->vnet)->getConsumer(), str);
++                    }
++                    if(nls->responses_map.size() > 0){
++                        str = "";
++                        for (auto& it : nls->responses_map){
++                            str += "[" + CoherenceResponseType_to_string((CoherenceResponseType)it.first)+" : " + std::to_string(it.second) +"]";
++                        }
++                        DPRINTF(RubyNetConnections, "vnet:%d, %s->%s, RESP: %s\n",
++                            nls->vnet, src_str, *m_nis[nls->dst_ni]->get_outNode_ptr(nls->vnet)->getConsumer(), str);
++                    }
++                    if(nls->req_resp_others > 0){
++                        DPRINTF(RubyNetConnections, "vnet:%d, %s->%s, OTHERS: %ld\n",
++                            nls->vnet, src_str, *m_nis[nls->dst_ni]->get_outNode_ptr(nls->vnet)->getConsumer(), nls->req_resp_others);
++                    }
++                }
++            }
++        }
++    }
++    DPRINTF(RubyNetConnections, "End Stats\n");
++}
+ 
+ void
+ GarnetNetwork::collateStats()
+@@ -425,6 +573,146 @@ GarnetNetwork::collateStats()
+     for (int i = 0; i < m_routers.size(); i++) {
+         m_routers[i]->collateStats();
+     }
++
++    noc_latencies_collate();
++
++}
++
++void GarnetNetwork::resetStats()
++{
++    for (int i = 0; i < m_routers.size(); i++) {
++        m_routers[i]->resetStats();
++    }
++    for (int i = 0; i < m_networklinks.size(); i++) {
++        m_networklinks[i]->resetStats();
++    }
++    for (int i = 0; i < m_creditlinks.size(); i++) {
++        m_creditlinks[i]->resetStats();
++    }
++
++    for (int i = 0; i < m_virtual_networks; i++ ){
++        // Do not delete the NoC Lat map contents just reset stats
++        map<src_dst_ni_key, noc_latency_struct*>::iterator it;
++        for (it = m_noc_latency_map[i].begin(); it != m_noc_latency_map[i].end(); ++it ){
++            it->second->total_flits = 0;
++            it->second->queue_lat = (Cycles) 0;
++            it->second->net_lat = (Cycles) 0;
++            it->second->src_queue_lat = (Cycles) 0;
++            it->second->noc_latencies[NOC_QUEUE_LAT_INDEX].clear();
++            it->second->noc_latencies[NOC_NET_LAT_INDEX].clear();
++
++            it->second->requests_map.clear();
++            it->second->responses_map.clear();
++            it->second->req_resp_others = 0;
++        }
++    }
++}
++
++void
++GarnetNetwork::profile_path_latencies(flit *t_flit, int vnet, Cycles queueing_delay, Cycles network_delay, Cycles src_queue_delay){
++
++    RouteInfo ri = t_flit->get_route();
++    src_dst_ni_key key = latency_map_key_encode(ri.src_ni, ri.dest_ni);
++    std::map<src_dst_ni_key, noc_latency_struct*>::iterator it;
++
++    // If src_ni - dest_ni combo not found in map
++    if ((it = m_noc_latency_map[vnet].find(key)) == m_noc_latency_map[vnet].end()){
++        noc_latency_struct *nls = new noc_latency_struct;
++        nls->queue_lat = queueing_delay;
++        nls->net_lat = network_delay;
++        nls->src_queue_lat = src_queue_delay;
++        nls->src_ni = ri.src_ni;
++        nls->dst_ni = ri.dest_ni;
++        nls->vnet = vnet;
++        nls->src_router = ri.src_router;
++        nls->dst_router = ri.dest_router;
++        nls->hops = ri.hops_traversed;
++        nls->total_flits = 1;
++
++        nls->noc_latencies[NOC_QUEUE_LAT_INDEX].push_back(queueing_delay);
++        nls->noc_latencies[NOC_NET_LAT_INDEX].push_back(network_delay);
++
++        MsgPtr msg_ptr = t_flit->get_msg_ptr();
++        if (msg_ptr->getReqRespType() == ReqRespType::ReqRespType_REQ){
++            nls->requests_map[msg_ptr->getReqRespSpecificType()] += 1;
++        }
++        else if (msg_ptr->getReqRespType() == ReqRespType::ReqRespType_RESP){
++            nls->responses_map[msg_ptr->getReqRespSpecificType()] += 1;
++        }
++        else if (msg_ptr->getReqRespType() == ReqRespType::ReqRespType_OTHER){
++            nls->req_resp_others = 1;
++        }
++        else{
++            DPRINTF(RubyNetConnections, "UNSPECIFIED msg type for: %s\n", *msg_ptr);
++            assert(0);
++        }
++
++        m_noc_latency_map[vnet].insert(std::pair<src_dst_ni_key, noc_latency_struct*>(key, nls));
++    }
++    else {
++        noc_latency_struct *nls = it->second;
++        nls->queue_lat += queueing_delay;
++        nls->net_lat += network_delay;
++        nls->src_queue_lat += src_queue_delay;
++        nls->total_flits ++;
++        nls->noc_latencies[NOC_QUEUE_LAT_INDEX].push_back(queueing_delay);
++        nls->noc_latencies[NOC_NET_LAT_INDEX].push_back(network_delay);
++
++        MsgPtr msg_ptr = t_flit->get_msg_ptr();
++        if (msg_ptr->getReqRespType() == ReqRespType::ReqRespType_REQ){
++            nls->requests_map[msg_ptr->getReqRespSpecificType()] += 1;
++        }
++        else if (msg_ptr->getReqRespType() == ReqRespType::ReqRespType_RESP){
++            nls->responses_map[msg_ptr->getReqRespSpecificType()] += 1;
++        }
++        else if (msg_ptr->getReqRespType() == ReqRespType::ReqRespType_OTHER){
++            nls->req_resp_others++;
++        }
++        else{
++            DPRINTF(RubyNetConnections, "V2: UNSPECIFIED msg type for: %s\n", *msg_ptr);
++            assert(0);
++        }
++
++        /*
++        uint64_t print_threshold = 10000;
++        uint64_t const step = 10000;
++
++        if (nls->total_flits > print_threshold){
++            noc_latencies_collate();
++            print_threshold += step;
++        }
++        */
++
++
++        /*
++        // Warning printouts for increased latencies
++        if (queueing_delay > 2500 || network_delay > 2500 ){
++                std::string src_str;
++                std::stringstream ss;
++                if(!m_nis[nls->src_ni]->get_outNode_ptr(nls->vnet)){
++                    src_str = "Other";
++                }else{
++                    m_nis[nls->src_ni]->get_outNode_ptr(nls->vnet)->getConsumer()->print(ss);
++                    src_str = ss.str();
++                }
++                DPRINTF(RubyNetConnections, "WARNING:[Q:%ld,N:%ld] vnet:%d, NI[%d->%d], %s->%s, Rtr[%d->%d], hops[%d], flits:%ld\n",
++                    queueing_delay, network_delay,
++                    nls->vnet,
++                    nls->src_ni, nls->dst_ni,
++                    src_str,
++                    *m_nis[nls->dst_ni]->get_outNode_ptr(nls->vnet)->getConsumer(),
++                    nls->src_router, nls->dst_router,
++                    nls->hops, nls->total_flits
++                );
++        }
++        */
++
++    }
++
++
++
++
++
+ }
+ 
+ void
+diff --git a/src/mem/ruby/network/garnet2.0/GarnetNetwork.hh b/src/mem/ruby/network/garnet2.0/GarnetNetwork.hh
+index d8cbb083c1..6a1dcf9e8b 100644
+--- a/src/mem/ruby/network/garnet2.0/GarnetNetwork.hh
++++ b/src/mem/ruby/network/garnet2.0/GarnetNetwork.hh
+@@ -40,8 +40,16 @@
+ #include "mem/ruby/network/Network.hh"
+ #include "mem/ruby/network/fault_model/FaultModel.hh"
+ #include "mem/ruby/network/garnet2.0/CommonTypes.hh"
++#include "mem/ruby/network/garnet2.0/flit.hh"
+ #include "params/GarnetNetwork.hh"
+ 
++// ppetrak: LATENCY_MAP_KEY_ENCODE_SIZE_BITS should be adjusted in case that the total number
++// of NoC IPs becomes > 4096.
++#define LATENCY_MAP_KEY_ENCODE_SIZE_BITS 12
++
++#define NOC_QUEUE_LAT_INDEX 0
++#define NOC_NET_LAT_INDEX 1
++
+ class FaultModel;
+ class NetworkInterface;
+ class Router;
+@@ -84,7 +92,7 @@ class GarnetNetwork : public Network
+         return m_vnet_type[vnet];
+     }
+     int getNumRouters();
+-    int get_router_id(int ni);
++    int get_router_id(int ni, int layer);
+ 
+ 
+     // Methods used by Topology to setup the network
+@@ -103,6 +111,7 @@ class GarnetNetwork : public Network
+ 
+     // Stats
+     void collateStats();
++    void resetStats();
+     void regStats();
+     void print(std::ostream& out) const;
+ 
+@@ -143,6 +152,9 @@ class GarnetNetwork : public Network
+         m_total_hops += hops;
+     }
+ 
++    void profile_path_latencies(flit *t_flit, int vnet, Cycles queueing_delay, Cycles network_delay, Cycles src_queue_delay);
++    void noc_latencies_collate();
++
+   protected:
+     // Configuration
+     int m_num_rows;
+@@ -153,6 +165,7 @@ class GarnetNetwork : public Network
+     uint32_t m_buffers_per_data_vc;
+     int m_routing_algorithm;
+     bool m_enable_fault_model;
++    typedef uint64_t src_dst_ni_key;
+ 
+     // Statistical variables
+     Stats::Vector m_packets_received;
+@@ -195,6 +208,30 @@ class GarnetNetwork : public Network
+     std::vector<NetworkLink *> m_networklinks; // All flit links in the network
+     std::vector<CreditLink *> m_creditlinks; // All credit links in the network
+     std::vector<NetworkInterface *> m_nis;   // All NI's in Network
++
++    struct noc_latency_struct{
++        uint64_t total_flits;
++        Cycles queue_lat;
++        Cycles net_lat;
++        Cycles src_queue_lat;
++        int src_ni;
++        int dst_ni;
++        int src_router;
++        int dst_router;
++        int hops;
++        int vnet;
++        std::vector<Cycles> noc_latencies[2];
++        uint64_t req_resp_others = 0;
++        std::map<uint16_t, uint64_t> requests_map;
++        std::map<uint16_t, uint64_t> responses_map;
++    };
++
++    std::map<src_dst_ni_key, noc_latency_struct*> *m_noc_latency_map;
++
++    src_dst_ni_key latency_map_key_encode(int src_ni, int dst_ni ){ return (src_ni << LATENCY_MAP_KEY_ENCODE_SIZE_BITS) + dst_ni; }
++    int latency_map_key_get_src_ni(src_dst_ni_key key ) { return (key >> LATENCY_MAP_KEY_ENCODE_SIZE_BITS); }
++    int latency_map_key_get_dst_ni(src_dst_ni_key key) { return (key & ((1 << LATENCY_MAP_KEY_ENCODE_SIZE_BITS) - 1 )); }
++
+ };
+ 
+ inline std::ostream&
+diff --git a/src/mem/ruby/network/garnet2.0/GarnetNetwork.py b/src/mem/ruby/network/garnet2.0/GarnetNetwork.py
+index 04c0ef46bb..a00a7ff9a6 100644
+--- a/src/mem/ruby/network/garnet2.0/GarnetNetwork.py
++++ b/src/mem/ruby/network/garnet2.0/GarnetNetwork.py
+@@ -40,14 +40,15 @@ class GarnetNetwork(RubyNetwork):
+     num_rows = Param.Int(0, "number of rows if 2D (mesh/torus/..) topology");
+     ni_flit_size = Param.UInt32(16, "network interface flit size in bytes")
+     vcs_per_vnet = Param.UInt32(4, "virtual channels per virtual network");
+-    buffers_per_data_vc = Param.UInt32(4, "buffers per data virtual channel");
+-    buffers_per_ctrl_vc = Param.UInt32(1, "buffers per ctrl virtual channel");
++    buffers_per_data_vc = Param.UInt32(2, "buffers per data virtual channel");
++    buffers_per_ctrl_vc = Param.UInt32(2, "buffers per ctrl virtual channel");
+     routing_algorithm = Param.Int(0,
+         "0: Weight-based Table, 1: XY, 2: Custom");
+     enable_fault_model = Param.Bool(False, "enable network fault model");
+     fault_model = Param.FaultModel(NULL, "network fault model");
+     garnet_deadlock_threshold = Param.UInt32(50000,
+                               "network-level deadlock threshold")
++    noc_layers = Param.UInt32(0, "Number of NoC layers")
+ 
+ class GarnetNetworkInterface(ClockedObject):
+     type = 'GarnetNetworkInterface'
+@@ -55,12 +56,15 @@ class GarnetNetworkInterface(ClockedObject):
+     cxx_header = "mem/ruby/network/garnet2.0/NetworkInterface.hh"
+ 
+     id = Param.UInt32("ID in relation to other network interfaces")
++    offset_vnet = Param.UInt32("FORTH-Extension: Use secondary VNETs for Requests/Responses")
++
+     vcs_per_vnet = Param.UInt32(Parent.vcs_per_vnet,
+                              "virtual channels per virtual network")
+     virt_nets = Param.UInt32(Parent.number_of_virtual_networks,
+                           "number of virtual networks")
+     garnet_deadlock_threshold = Param.UInt32(Parent.garnet_deadlock_threshold,
+                                       "network-level deadlock threshold")
++    noc_layers = Param.UInt32(Parent.noc_layers, "Number of NoC layers")
+ 
+ class GarnetRouter(BasicRouter):
+     type = 'GarnetRouter'
+diff --git a/src/mem/ruby/network/garnet2.0/NetworkInterface.cc b/src/mem/ruby/network/garnet2.0/NetworkInterface.cc
+index 4e692704d1..3c441eaae1 100644
+--- a/src/mem/ruby/network/garnet2.0/NetworkInterface.cc
++++ b/src/mem/ruby/network/garnet2.0/NetworkInterface.cc
+@@ -30,6 +30,8 @@
+  *          Tushar Krishna
+  */
+ 
++// Authors: ICS-FORTH, Polydoros Petrakis <ppetrak@ics.forth.gr>
++// Add support for mutliple NoC layers (Separate NoC for each traffic class/VNET)
+ 
+ #include "mem/ruby/network/garnet2.0/NetworkInterface.hh"
+ 
+@@ -39,26 +41,40 @@
+ #include "base/cast.hh"
+ #include "base/stl_helpers.hh"
+ #include "debug/RubyNetwork.hh"
++#include "debug/RubyNetConnections.hh"
++#include "debug/RubyNetInjectedPackets.hh"
+ #include "mem/ruby/network/MessageBuffer.hh"
+ #include "mem/ruby/network/garnet2.0/Credit.hh"
+ #include "mem/ruby/network/garnet2.0/flitBuffer.hh"
+ #include "mem/ruby/slicc_interface/Message.hh"
+ 
++// ppetrak: Dynamically generated depending on the CC protocol
++#include "mem/ruby/protocol/RequestMsg.hh"
++#include "mem/ruby/protocol/ResponseMsg.hh"
++#include "mem/ruby/protocol/CoherenceRequestType.hh"
++#include "mem/ruby/protocol/CoherenceResponseType.hh"
++
+ using namespace std;
+ using m5::stl_helpers::deletePointers;
+ 
+ NetworkInterface::NetworkInterface(const Params *p)
+     : ClockedObject(p), Consumer(this), m_id(p->id),
++      m_offset_vnet(p->offset_vnet),
+       m_virtual_networks(p->virt_nets), m_vc_per_vnet(p->vcs_per_vnet),
+       m_num_vcs(m_vc_per_vnet * m_virtual_networks),
++      m_max_net_layers(p->noc_layers),
+       m_deadlock_threshold(p->garnet_deadlock_threshold),
+       vc_busy_counter(m_virtual_networks, 0)
+ {
+-    m_router_id = -1;
++    m_layer = 0;
++    for (int i = 0 ; i < m_max_net_layers; i++){
++       m_router_id[i] = -1;
++       outCreditQueue[i] = new flitBuffer();
++    }
++
+     m_vc_round_robin = 0;
+     m_ni_out_vcs.resize(m_num_vcs);
+     m_ni_out_vcs_enqueue_time.resize(m_num_vcs);
+-    outCreditQueue = new flitBuffer();
+ 
+     // instantiating the NI flit buffers
+     for (int i = 0; i < m_num_vcs; i++) {
+@@ -72,6 +88,7 @@ NetworkInterface::NetworkInterface(const Params *p)
+     }
+ 
+     m_stall_count.resize(m_virtual_networks);
++    //DPRINTF(RubyNetConnections, "NI_instantiate[%d]\n", m_id);
+ }
+ 
+ void
+@@ -86,18 +103,28 @@ NetworkInterface::~NetworkInterface()
+ {
+     deletePointers(m_out_vc_state);
+     deletePointers(m_ni_out_vcs);
+-    delete outCreditQueue;
+-    delete outFlitQueue;
++    for (int i = 0 ; i < m_max_net_layers; i++){
++        delete outCreditQueue[i];
++        delete outFlitQueue[i];
++    }
+ }
+ 
+ void
+ NetworkInterface::addInPort(NetworkLink *in_link,
+                               CreditLink *credit_link)
+ {
+-    inNetLink = in_link;
++    inNetLink[m_layer] = in_link;
+     in_link->setLinkConsumer(this);
+-    outCreditLink = credit_link;
+-    credit_link->setSourceQueue(outCreditQueue);
++    outCreditLink[m_layer] = credit_link;
++    credit_link->setSourceQueue(outCreditQueue[m_layer]);
++
++    DPRINTF(RubyNetConnections,
++            "addInPort was called for layer = %d\n",
++            m_layer);
++
++    m_layer++;
++    if(m_layer == m_max_net_layers)
++        m_layer = 0;
+ }
+ 
+ void
+@@ -105,14 +132,23 @@ NetworkInterface::addOutPort(NetworkLink *out_link,
+                              CreditLink *credit_link,
+                              SwitchID router_id)
+ {
+-    inCreditLink = credit_link;
++    inCreditLink[m_layer] = credit_link;
+     credit_link->setLinkConsumer(this);
+ 
+-    outNetLink = out_link;
+-    outFlitQueue = new flitBuffer();
+-    out_link->setSourceQueue(outFlitQueue);
+-
+-    m_router_id = router_id;
++    outNetLink[m_layer] = out_link;
++    outFlitQueue[m_layer] = new flitBuffer();
++    out_link->setSourceQueue(outFlitQueue[m_layer]);
++    DPRINTF(RubyNetConnections,
++    "addOutPort was called for layer = %d\n",
++            m_layer);
++    DPRINTF(RubyNetConnections,
++            "Connecting Router [%d] to NI[%p] (layer = %d)\n",
++            router_id, this, m_layer );
++
++    m_router_id[m_layer] = router_id;
++    m_layer++;
++    if(m_layer == m_max_net_layers)
++        m_layer = 0;
+ }
+ 
+ void
+@@ -122,6 +158,8 @@ NetworkInterface::addNode(vector<MessageBuffer *>& in,
+     inNode_ptr = in;
+     outNode_ptr = out;
+ 
++    DPRINTF(RubyNetConnections, "NI[%d] add_Message_buffer_ptrs\n", m_id);
++
+     for (auto& it : in) {
+         if (it != nullptr) {
+             it->setConsumer(this);
+@@ -129,6 +167,14 @@ NetworkInterface::addNode(vector<MessageBuffer *>& in,
+     }
+ }
+ 
++MessageBuffer*
++NetworkInterface::get_outNode_ptr(int vnet){
++    if (vnet >= MAX_CC_PROTOCOL_VNET)
++        return outNode_ptr[ vnet - MAX_CC_PROTOCOL_VNET];
++    else
++        return outNode_ptr[vnet];
++}
++
+ void
+ NetworkInterface::dequeueCallback()
+ {
+@@ -161,6 +207,9 @@ NetworkInterface::incrementStats(flit *t_flit)
+         m_net_ptr->increment_packet_queueing_latency(queueing_delay, vnet);
+     }
+ 
++    // Src-Dest path Avg. Max Min Median NoC Queue & Net latencies and counters for CC message types
++    m_net_ptr->profile_path_latencies(t_flit, vnet, queueing_delay, network_delay, src_queueing_delay);
++
+     // Hops
+     m_net_ptr->increment_total_hops(t_flit->get_route().hops_traversed);
+ }
+@@ -178,8 +227,8 @@ NetworkInterface::incrementStats(flit *t_flit)
+ void
+ NetworkInterface::wakeup()
+ {
+-    DPRINTF(RubyNetwork, "Network Interface %d connected to router %d "
+-            "woke up at time: %lld\n", m_id, m_router_id, curCycle());
++    //DPRINTF(RubyNetwork, "Network Interface %d connected to router %d "
++    //        "woke up at time: %lld\n", m_id, m_router_id, curCycle());
+ 
+     MsgPtr msg_ptr;
+     Tick curTime = clockEdge();
+@@ -194,9 +243,52 @@ NetworkInterface::wakeup()
+ 
+         if (b->isReady(curTime)) { // Is there a message waiting
+             msg_ptr = b->peekMsgPtr();
+-            if (flitisizeMessage(msg_ptr, vnet)) {
++            //// start
++            RequestMsg* req_dyn = dynamic_cast<RequestMsg*>(msg_ptr.get());
++            ResponseMsg* resp_dyn = dynamic_cast<ResponseMsg*>(msg_ptr.get());
++
++            if (req_dyn){
++                    RequestMsg* req = safe_cast<RequestMsg*>(msg_ptr.get());
++                    //DPRINTF(RubyNetConnections, "NI[%d], vnet=%d, REQ: Requestor[%s], Type[%s], Addr:%lx\n",
++                    //m_id, vnet, req->getRequestor(), req->getType(), req->getaddr() );
++                    if (msg_ptr->getReqRespType() == 0){
++                        msg_ptr->setReqRespType(ReqRespType::ReqRespType_REQ);
++                        msg_ptr->setReqRespSpecificType ( req->getType() );
++                    }
++
++            }else{
++                if(resp_dyn){
++                    ResponseMsg* resp = safe_cast<ResponseMsg*>(msg_ptr.get());
++                    //DPRINTF(RubyNetConnections, "NI[%d], vnet=%d, RESP: Requestor[%s], Type[%s], Addr:%lx\n",
++                    //m_id, vnet, resp->getSender(), resp->getType(), resp->getaddr() );
++                    if (msg_ptr->getReqRespType() == 0){
++                        msg_ptr->setReqRespType(ReqRespType::ReqRespType_RESP);
++                        msg_ptr->setReqRespSpecificType ( resp->getType() );
++                    }
++                }
++                else{
++                    // Other types of messages like DMA Requests / DMA responses etc.
++                    //DPRINTF(RubyNetConnections, "NI[%d], OTHER: msg_ptr[%s]\n", m_id, *msg_ptr);
++                    msg_ptr->setReqRespType(ReqRespType::ReqRespType_OTHER);
++                }
++            }
++            //// end
++
++            int target_vnet = vnet;
++
++            if (m_offset_vnet > 0 ){
++                target_vnet = vnet + m_offset_vnet;
++                msg_ptr->setVnet(target_vnet);
++            }
++            if (flitisizeMessage(msg_ptr, target_vnet)) {
+                 b->dequeue(curTime);
+             }
++            else {
++                if(m_offset_vnet > 0 ){
++                    // Flitisizing failed - Restore msg vnet to previous value
++                    msg_ptr->setVnet(vnet);
++                }
++            }
+         }
+     }
+ 
+@@ -207,74 +299,92 @@ NetworkInterface::wakeup()
+     // message is enqueued to restrict ejection to one message per cycle.
+     bool messageEnqueuedThisCycle = checkStallQueue();
+ 
+-    /*********** Check the incoming flit link **********/
+-    if (inNetLink->isReady(curCycle())) {
+-        flit *t_flit = inNetLink->consumeLink();
+-        int vnet = t_flit->get_vnet();
+-        t_flit->set_dequeue_time(curCycle());
+-
+-        // If a tail flit is received, enqueue into the protocol buffers if
+-        // space is available. Otherwise, exchange non-tail flits for credits.
+-        if (t_flit->get_type() == TAIL_ || t_flit->get_type() == HEAD_TAIL_) {
+-            if (!messageEnqueuedThisCycle &&
+-                outNode_ptr[vnet]->areNSlotsAvailable(1, curTime)) {
+-                // Space is available. Enqueue to protocol buffer.
+-                outNode_ptr[vnet]->enqueue(t_flit->get_msg_ptr(), curTime,
+-                                           cyclesToTicks(Cycles(1)));
++    for (int i = 0 ; i < m_max_net_layers; i++){
++        /*********** Check the incoming flit link **********/
++        if (inNetLink[i]->isReady(curCycle())) {
++            flit *t_flit = inNetLink[i]->consumeLink();
++            int vnet = t_flit->get_vnet();
++            t_flit->set_dequeue_time(curCycle());
++
++            int protocol_vnet;
++            if (vnet >= MAX_CC_PROTOCOL_VNET ){
++                protocol_vnet = vnet - MAX_CC_PROTOCOL_VNET;
++            }else{
++                protocol_vnet = vnet;
++            }
++            assert(protocol_vnet < MAX_CC_PROTOCOL_VNET);
+ 
+-                // Simply send a credit back since we are not buffering
+-                // this flit in the NI
+-                sendCredit(t_flit, true);
++            // If a tail flit is received, enqueue into the protocol buffers if
++            // space is available. Otherwise, exchange non-tail flits for credits.
++            if (t_flit->get_type() == TAIL_ || t_flit->get_type() == HEAD_TAIL_) {
++
++                if (!messageEnqueuedThisCycle &&
++                    outNode_ptr[protocol_vnet]->areNSlotsAvailable(1, curTime)) {
++                    // Space is available. Enqueue to protocol buffer.
++
++                    if (vnet != protocol_vnet){
++                        // DPRINTF(RubyNetConnections, "Restoring msg to original state:VNET[%d->%d] %s\n", vnet, protocol_vnet, *t_flit);
++                        t_flit->get_msg_ptr()->setVnet(protocol_vnet);
++                    }
++                    outNode_ptr[protocol_vnet]->enqueue(t_flit->get_msg_ptr(), curTime,
++                                            cyclesToTicks(Cycles(1)));
++
++                    // Simply send a credit back since we are not buffering
++                    // this flit in the NI
++                    sendCredit(t_flit, true, layer_from_vnet(vnet));
++
++                    // Update stats and delete flit pointer
++                    incrementStats(t_flit);
++                    delete t_flit;
++                } else {
++                    // No space available- Place tail flit in stall queue and set
++                    // up a callback for when protocol buffer is dequeued. Stat
++                    // update and flit pointer deletion will occur upon unstall.
++                    m_stall_queue.push_back(t_flit);
++                    m_stall_count[protocol_vnet]++;
++                    auto cb = std::bind(&NetworkInterface::dequeueCallback, this);
++                    outNode_ptr[protocol_vnet]->registerDequeueCallback(cb);
++
++                    // DPRINTF(RubyNetConnections, "STALL case, current count: %d\n", m_stall_count[protocol_vnet]);
+ 
+-                // Update stats and delete flit pointer
++                }
++            } else {
++                // Non-tail flit. Send back a credit but not VC free signal.
++                sendCredit(t_flit, false, layer_from_vnet(vnet));
++
++                // Update stats and delete flit pointer.
+                 incrementStats(t_flit);
+                 delete t_flit;
+-            } else {
+-                // No space available- Place tail flit in stall queue and set
+-                // up a callback for when protocol buffer is dequeued. Stat
+-                // update and flit pointer deletion will occur upon unstall.
+-                m_stall_queue.push_back(t_flit);
+-                m_stall_count[vnet]++;
+-
+-                auto cb = std::bind(&NetworkInterface::dequeueCallback, this);
+-                outNode_ptr[vnet]->registerDequeueCallback(cb);
+             }
+-        } else {
+-            // Non-tail flit. Send back a credit but not VC free signal.
+-            sendCredit(t_flit, false);
+-
+-            // Update stats and delete flit pointer.
+-            incrementStats(t_flit);
+-            delete t_flit;
+         }
+-    }
+ 
+-    /****************** Check the incoming credit link *******/
++        /****************** Check the incoming credit link *******/
+ 
+-    if (inCreditLink->isReady(curCycle())) {
+-        Credit *t_credit = (Credit*) inCreditLink->consumeLink();
+-        m_out_vc_state[t_credit->get_vc()]->increment_credit();
+-        if (t_credit->is_free_signal()) {
+-            m_out_vc_state[t_credit->get_vc()]->setState(IDLE_, curCycle());
++        if (inCreditLink[i]->isReady(curCycle())) {
++            Credit *t_credit = (Credit*) inCreditLink[i]->consumeLink();
++            m_out_vc_state[t_credit->get_vc()]->increment_credit();
++            if (t_credit->is_free_signal()) {
++                m_out_vc_state[t_credit->get_vc()]->setState(IDLE_, curCycle());
++            }
++            delete t_credit;
+         }
+-        delete t_credit;
+-    }
+ 
+ 
+-    // It is possible to enqueue multiple outgoing credit flits if a message
+-    // was unstalled in the same cycle as a new message arrives. In this
+-    // case, we should schedule another wakeup to ensure the credit is sent
+-    // back.
+-    if (outCreditQueue->getSize() > 0) {
+-        outCreditLink->scheduleEventAbsolute(clockEdge(Cycles(1)));
++        // It is possible to enqueue multiple outgoing credit flits if a message
++        // was unstalled in the same cycle as a new message arrives. In this
++        // case, we should schedule another wakeup to ensure the credit is sent
++        // back.
++        if (outCreditQueue[i]->getSize() > 0) {
++            outCreditLink[i]->scheduleEventAbsolute(clockEdge(Cycles(1)));
++        }
+     }
+ }
+ 
+ void
+-NetworkInterface::sendCredit(flit *t_flit, bool is_free)
++NetworkInterface::sendCredit(flit *t_flit, bool is_free, int layer)
+ {
+     Credit *credit_flit = new Credit(t_flit->get_vc(), is_free, curCycle());
+-    outCreditQueue->insert(credit_flit);
++    outCreditQueue[layer]->insert(credit_flit);
+ }
+ 
+ bool
+@@ -282,21 +392,35 @@ NetworkInterface::checkStallQueue()
+ {
+     bool messageEnqueuedThisCycle = false;
+     Tick curTime = clockEdge();
+-
++    //ppetrak: Handle stalled flits heading to protocol
+     if (!m_stall_queue.empty()) {
+         for (auto stallIter = m_stall_queue.begin();
+              stallIter != m_stall_queue.end(); ) {
+             flit *stallFlit = *stallIter;
+             int vnet = stallFlit->get_vnet();
+ 
++            int protocol_vnet;
++            if (vnet >= MAX_CC_PROTOCOL_VNET){
++                protocol_vnet = vnet - MAX_CC_PROTOCOL_VNET;
++            }else
++            {
++                protocol_vnet = vnet;
++            }
++            assert(protocol_vnet < MAX_CC_PROTOCOL_VNET);
++
+             // If we can now eject to the protocol buffer, send back credits
+-            if (outNode_ptr[vnet]->areNSlotsAvailable(1, curTime)) {
+-                outNode_ptr[vnet]->enqueue(stallFlit->get_msg_ptr(), curTime,
++            if (outNode_ptr[protocol_vnet]->areNSlotsAvailable(1, curTime)) {
++
++                if (vnet != protocol_vnet){
++                    stallFlit->get_msg_ptr()->setVnet(protocol_vnet);
++                    //DPRINTF(RubyNetConnections, "STALL: Restoring msg to original state:VNET[%d->%d] %s\n", vnet, protocol_vnet, *stallFlit);
++                }
++                outNode_ptr[protocol_vnet]->enqueue(stallFlit->get_msg_ptr(), curTime,
+                                            cyclesToTicks(Cycles(1)));
+ 
+                 // Send back a credit with free signal now that the VC is no
+                 // longer stalled.
+-                sendCredit(stallFlit, true);
++                sendCredit(stallFlit, true, layer_from_vnet(vnet));
+ 
+                 // Update Stats
+                 incrementStats(stallFlit);
+@@ -304,12 +428,12 @@ NetworkInterface::checkStallQueue()
+                 // Flit can now safely be deleted and removed from stall queue
+                 delete stallFlit;
+                 m_stall_queue.erase(stallIter);
+-                m_stall_count[vnet]--;
++                m_stall_count[protocol_vnet]--;
+ 
+                 // If there are no more stalled messages for this vnet, the
+                 // callback on it's MessageBuffer is not needed.
+-                if (m_stall_count[vnet] == 0)
+-                    outNode_ptr[vnet]->unregisterDequeueCallback();
++                if (m_stall_count[protocol_vnet] == 0)
++                    outNode_ptr[protocol_vnet]->unregisterDequeueCallback();
+ 
+                 messageEnqueuedThisCycle = true;
+                 break;
+@@ -377,15 +501,19 @@ NetworkInterface::flitisizeMessage(MsgPtr msg_ptr, int vnet)
+         route.vnet = vnet;
+         route.net_dest = new_net_msg_ptr->getDestination();
+         route.src_ni = m_id;
+-        route.src_router = m_router_id;
++        route.src_router = m_router_id[layer_from_vnet(vnet)];
+         route.dest_ni = destID;
+-        route.dest_router = m_net_ptr->get_router_id(destID);
++        route.dest_router = m_net_ptr->get_router_id(destID, layer_from_vnet(vnet));
+ 
+         // initialize hops_traversed to -1
+         // so that the first router increments it to 0
+         route.hops_traversed = -1;
+ 
+         m_net_ptr->increment_injected_packets(vnet);
++
++        // Enable this flag if you want to keep track of every single packet injected in the NoC
++        DPRINTF(RubyNetInjectedPackets, "SrcRouter[%02d], Message: %s, Receiver = %s\n", route.src_router, (*new_msg_ptr), new_msg_ptr->getDestination().smallestElement());
++
+         for (int i = 0; i < num_flits; i++) {
+             m_net_ptr->increment_injected_flits(vnet);
+             flit *fl = new flit(i, vc, vnet, route, num_flits, new_msg_ptr,
+@@ -426,7 +554,6 @@ NetworkInterface::calculateVC(int vnet)
+     return -1;
+ }
+ 
+-
+ /** This function looks at the NI buffers
+  *  if some buffer has flits which are ready to traverse the link in the next
+  *  cycle, and the downstream output vc associated with this flit has buffers
+@@ -437,7 +564,14 @@ void
+ NetworkInterface::scheduleOutputLink()
+ {
+     int vc = m_vc_round_robin;
++    bool vnet_already_used[m_max_net_layers];
+ 
++    if(m_max_net_layers > 1){
++        assert(m_max_net_layers == m_virtual_networks);
++        for (int i = 0 ; i < m_max_net_layers; i++){
++            vnet_already_used[i] = false;
++        }
++    }
+     for (int i = 0; i < m_num_vcs; i++) {
+         vc++;
+         if (vc == m_num_vcs)
+@@ -451,7 +585,12 @@ NetworkInterface::scheduleOutputLink()
+             int t_vnet = get_vnet(vc);
+             int vc_base = t_vnet * m_vc_per_vnet;
+ 
++            //ppetrak: If one VC from same VNET is already used continue
++            if(m_max_net_layers > 1 && vnet_already_used[t_vnet])
++                continue;
++
+             if (m_net_ptr->isVNetOrdered(t_vnet)) {
++                //assert(0); //ppetrak - just for isVNetOrdered testing
+                 for (int vc_offset = 0; vc_offset < m_vc_per_vnet;
+                      vc_offset++) {
+                     int t_vc = vc_base + vc_offset;
+@@ -467,21 +606,35 @@ NetworkInterface::scheduleOutputLink()
+             if (!is_candidate_vc)
+                 continue;
+ 
++            if(m_max_net_layers > 1)
++                vnet_already_used[t_vnet] = true;
++
+             m_vc_round_robin = vc;
+ 
+             m_out_vc_state[vc]->decrement_credit();
+             // Just removing the flit
+             flit *t_flit = m_ni_out_vcs[vc]->getTopFlit();
+             t_flit->set_time(curCycle() + Cycles(1));
+-            outFlitQueue->insert(t_flit);
++
++            int layer = layer_from_vnet(t_vnet);
++            outFlitQueue[layer]->insert(t_flit);
+             // schedule the out link
+-            outNetLink->scheduleEventAbsolute(clockEdge(Cycles(1)));
++            outNetLink[layer]->scheduleEventAbsolute(clockEdge(Cycles(1)));
+ 
+             if (t_flit->get_type() == TAIL_ ||
+                t_flit->get_type() == HEAD_TAIL_) {
+                 m_ni_out_vcs_enqueue_time[vc] = Cycles(INFINITE_);
+             }
+-            return;
++            // ppetrak: As soon as we enqueue one flit the work is done in
++            // the original apporach (return statement). This is adjusted for
++            // the multi layer approach.
++            if(m_max_net_layers > 1){
++                //DPRINTF(RubyNetConnections, "Continue scheduleOutputLink, vc=%d"
++                //        ", vnet= %d\n",vc, t_vnet);
++                continue;
++            }
++            else //ppetrak: Cases of a single NoC layer
++                return;
+         }
+     }
+ }
+@@ -529,6 +682,7 @@ NetworkInterface::print(std::ostream& out) const
+     out << "[Network Interface]";
+ }
+ 
++// ppetrak: Review this once more
+ uint32_t
+ NetworkInterface::functionalWrite(Packet *pkt)
+ {
+@@ -537,7 +691,8 @@ NetworkInterface::functionalWrite(Packet *pkt)
+         num_functional_writes += m_ni_out_vcs[i]->functionalWrite(pkt);
+     }
+ 
+-    num_functional_writes += outFlitQueue->functionalWrite(pkt);
++    for (int i = 0; i < m_max_net_layers; i++)
++        num_functional_writes += outFlitQueue[i]->functionalWrite(pkt);
+     return num_functional_writes;
+ }
+ 
+diff --git a/src/mem/ruby/network/garnet2.0/NetworkInterface.hh b/src/mem/ruby/network/garnet2.0/NetworkInterface.hh
+index 3b77371dec..5f706f3f7c 100644
+--- a/src/mem/ruby/network/garnet2.0/NetworkInterface.hh
++++ b/src/mem/ruby/network/garnet2.0/NetworkInterface.hh
+@@ -46,6 +46,13 @@
+ #include "mem/ruby/slicc_interface/Message.hh"
+ #include "params/GarnetNetworkInterface.hh"
+ 
++// The actual number of layers is given by param noc_layers
++// where noc_layers <= MAX_NET_LAYERS
++// TODO: Convert arrays to Vectors
++#define MAX_NET_LAYERS 10
++
++#define MAX_CC_PROTOCOL_VNET 3
++
+ class MessageBuffer;
+ class flitBuffer;
+ 
+@@ -69,27 +76,35 @@ class NetworkInterface : public ClockedObject, public Consumer
+ 
+     void print(std::ostream& out) const;
+     int get_vnet(int vc);
+-    int get_router_id() { return m_router_id; }
++    // Adjusted for multi-layered NoC
++    int get_router_id(int layer) { return m_router_id[layer]; }
+     void init_net_ptr(GarnetNetwork *net_ptr) { m_net_ptr = net_ptr; }
+-
++    // VNET to layer mapping function
++    int layer_from_vnet(int vnet) { return (m_max_net_layers>1)?vnet:0; }
+     uint32_t functionalWrite(Packet *);
+ 
++    // ppetrak: Helper method to access the IP attached to this NI
++    MessageBuffer* get_outNode_ptr(int vnet);
++
+   private:
+     GarnetNetwork *m_net_ptr;
+     const NodeID m_id;
++    const int m_offset_vnet;
+     const int m_virtual_networks, m_vc_per_vnet, m_num_vcs;
+-    int m_router_id; // id of my router
++    int m_router_id[MAX_NET_LAYERS]; // id of my router
++    int m_layer;
++    int m_max_net_layers;
+     std::vector<OutVcState *> m_out_vc_state;
+     std::vector<int> m_vc_allocator;
+     int m_vc_round_robin; // For round robin scheduling
+-    flitBuffer *outFlitQueue; // For modeling link contention
+-    flitBuffer *outCreditQueue;
++    flitBuffer *outFlitQueue[MAX_NET_LAYERS]; // For modeling link contention
++    flitBuffer *outCreditQueue[MAX_NET_LAYERS];
+     int m_deadlock_threshold;
+ 
+-    NetworkLink *inNetLink;
+-    NetworkLink *outNetLink;
+-    CreditLink *inCreditLink;
+-    CreditLink *outCreditLink;
++    NetworkLink *inNetLink[MAX_NET_LAYERS];
++    NetworkLink *outNetLink[MAX_NET_LAYERS];
++    CreditLink *inCreditLink[MAX_NET_LAYERS];
++    CreditLink *outCreditLink[MAX_NET_LAYERS];
+ 
+     // Queue for stalled flits
+     std::deque<flit *> m_stall_queue;
+@@ -113,7 +128,7 @@ class NetworkInterface : public ClockedObject, public Consumer
+ 
+     void scheduleOutputLink();
+     void checkReschedule();
+-    void sendCredit(flit *t_flit, bool is_free);
++    void sendCredit(flit *t_flit, bool is_free, int layer);
+ 
+     void incrementStats(flit *t_flit);
+ };
+diff --git a/src/mem/ruby/network/garnet2.0/Router.cc b/src/mem/ruby/network/garnet2.0/Router.cc
+index 7266f998ad..e26edc1cab 100644
+--- a/src/mem/ruby/network/garnet2.0/Router.cc
++++ b/src/mem/ruby/network/garnet2.0/Router.cc
+@@ -236,12 +236,9 @@ Router::collateStats()
+ void
+ Router::resetStats()
+ {
+-    for (int j = 0; j < m_virtual_networks; j++) {
+-        for (int i = 0; i < m_input_unit.size(); i++) {
+-            m_input_unit[i]->resetStats();
+-        }
++    for (int i = 0; i < m_input_unit.size(); i++) {
++        m_input_unit[i]->resetStats();
+     }
+-
+     m_switch->resetStats();
+     m_sw_alloc->resetStats();
+ }
+diff --git a/src/mem/ruby/profiler/Profiler.cc b/src/mem/ruby/profiler/Profiler.cc
+index 505e3a17d1..228f30ec76 100644
+--- a/src/mem/ruby/profiler/Profiler.cc
++++ b/src/mem/ruby/profiler/Profiler.cc
+@@ -132,6 +132,19 @@ Profiler::regStats(const std::string &pName)
+         .desc("")
+         .flags(Stats::nozero | Stats::pdf | Stats::oneline);
+ 
++#ifdef USE_FORTH_SEQUENCER
++    m_aliasedPktsHistSeqr
++        .init(10)
++        .name(pName + ".aliased_pkts_hist_seqr")
++        .desc("")
++        .flags(Stats::nozero | Stats::pdf | Stats::oneline);
++
++    m_aliasedPktsMapHistSeqr
++        .init(10)
++        .name(pName + ".aliased_map_size_hist_seqr")
++        .desc("")
++        .flags(Stats::nozero | Stats::pdf | Stats::oneline);
++#endif
+     m_outstandReqHistCoalsr
+         .init(10)
+         .name(pName + ".outstanding_req_hist_coalsr")
+@@ -378,6 +391,10 @@ Profiler::collateStats()
+             Sequencer *seq = ctr->getCPUSequencer();
+             if (seq != NULL) {
+                 m_outstandReqHistSeqr.add(seq->getOutstandReqHist());
++#ifdef USE_FORTH_SEQUENCER
++                m_aliasedPktsHistSeqr.add(seq->getAliasedPktsHist());
++                m_aliasedPktsMapHistSeqr.add(seq->getAliasedPktsMapSizeHist());
++#endif
+             }
+ #ifdef BUILD_GPU
+             GPUCoalescer *coal = ctr->getGPUCoalescer();
+diff --git a/src/mem/ruby/profiler/Profiler.hh b/src/mem/ruby/profiler/Profiler.hh
+index 5632b8490c..cd31ea5677 100644
+--- a/src/mem/ruby/profiler/Profiler.hh
++++ b/src/mem/ruby/profiler/Profiler.hh
+@@ -45,6 +45,12 @@
+ #ifndef __MEM_RUBY_PROFILER_PROFILER_HH__
+ #define __MEM_RUBY_PROFILER_PROFILER_HH__
+ 
++// ppetrak: comment USE_FORTH_SEQUENCER for quickly disabling
++// FORTH Sequencer related stats, in cases that we want to test
++// other Sequencer.cc files. Keep it as is for all other cases.
++
++#define USE_FORTH_SEQUENCER
++
+ #include <map>
+ #include <string>
+ #include <vector>
+@@ -97,6 +103,11 @@ class Profiler
+     Stats::Histogram m_outstandReqHistSeqr;
+     Stats::Histogram m_outstandReqHistCoalsr;
+ 
++#ifdef USE_FORTH_SEQUENCER
++    //! Histogram for number of aliased packets in Sequencer::m_aliased_PktMap
++    Stats::Histogram m_aliasedPktsHistSeqr;
++    Stats::Histogram m_aliasedPktsMapHistSeqr;
++#endif
+     //! Histogram for holding latency profile of all requests.
+     Stats::Histogram m_latencyHistSeqr;
+     Stats::Histogram m_latencyHistCoalsr;
+diff --git a/src/mem/ruby/protocol/MOESI_CMP_directory-L1cache.sm b/src/mem/ruby/protocol/MOESI_CMP_directory-L1cache.sm
+index b8d8ab4a0f..ae2b91aaa6 100644
+--- a/src/mem/ruby/protocol/MOESI_CMP_directory-L1cache.sm
++++ b/src/mem/ruby/protocol/MOESI_CMP_directory-L1cache.sm
+@@ -42,8 +42,8 @@ machine(MachineType:L1Cache, "L1 cache protocol")
+  : Sequencer * sequencer;
+    CacheMemory * L1Icache;
+    CacheMemory * L1Dcache;
+-   Cycles request_latency := 1;
+-   Cycles response_latency := 1;
++   Cycles request_latency := 8;
++   Cycles response_latency := 8;
+    Cycles use_timeout_latency := 50;
+    bool send_evictions;
+ 
+diff --git a/src/mem/ruby/protocol/MOESI_CMP_directory-L2cache.sm b/src/mem/ruby/protocol/MOESI_CMP_directory-L2cache.sm
+index faea79fec2..04573a6aab 100644
+--- a/src/mem/ruby/protocol/MOESI_CMP_directory-L2cache.sm
++++ b/src/mem/ruby/protocol/MOESI_CMP_directory-L2cache.sm
+@@ -40,8 +40,8 @@
+ 
+ machine(MachineType:L2Cache, "Token protocol")
+ : CacheMemory * L2cache;
+-  Cycles response_latency := 1;
+-  Cycles request_latency := 1;
++  Cycles response_latency := 10;
++  Cycles request_latency := 10;
+ 
+   // L2 BANK QUEUES
+   // From local bank of L2 cache TO the network
+diff --git a/src/mem/ruby/slicc_interface/Message.hh b/src/mem/ruby/slicc_interface/Message.hh
+index 0c2e0aa42f..62b073b25e 100644
+--- a/src/mem/ruby/slicc_interface/Message.hh
++++ b/src/mem/ruby/slicc_interface/Message.hh
+@@ -40,6 +40,14 @@
+ class Message;
+ typedef std::shared_ptr<Message> MsgPtr;
+ 
++typedef enum ReqRespType {
++  ReqRespType_FIRST,
++  ReqRespType_REQ,
++  ReqRespType_RESP,
++  ReqRespType_OTHER,
++  ReqRespType_NUM
++}ReqRespType;
++
+ class Message
+ {
+   public:
+@@ -53,7 +61,9 @@ class Message
+         : m_time(other.m_time),
+           m_LastEnqueueTime(other.m_LastEnqueueTime),
+           m_DelayedTicks(other.m_DelayedTicks),
+-          m_msg_counter(other.m_msg_counter)
++          m_msg_counter(other.m_msg_counter),
++          m_ReqRespType(other.m_ReqRespType),
++          m_ReqRespType_specific_type(other.m_ReqRespType_specific_type)
+     { }
+ 
+     virtual ~Message() { }
+@@ -102,12 +112,19 @@ class Message
+     void setIncomingLink(int link) { incoming_link = link; }
+     int getVnet() const { return vnet; }
+     void setVnet(int net) { vnet = net; }
++    ReqRespType getReqRespType() { return m_ReqRespType; }
++    uint16_t getReqRespSpecificType() { return m_ReqRespType_specific_type; }
++
++    void setReqRespType(ReqRespType type) { m_ReqRespType = type; }
++    void setReqRespSpecificType(uint16_t type)  { m_ReqRespType_specific_type = type; }
+ 
+   private:
+     const Tick m_time;
+     Tick m_LastEnqueueTime; // my last enqueue time
+     Tick m_DelayedTicks; // my delayed cycles
+     uint64_t m_msg_counter; // FIXME, should this be a 64-bit value?
++    ReqRespType m_ReqRespType = ReqRespType::ReqRespType_FIRST;
++    uint16_t m_ReqRespType_specific_type = 0;
+ 
+     // Variables for required network traversal
+     int incoming_link;
+diff --git a/src/mem/ruby/slicc_interface/RubyRequest.cc b/src/mem/ruby/slicc_interface/RubyRequest.cc
+index dd26ad6454..c947bef235 100644
+--- a/src/mem/ruby/slicc_interface/RubyRequest.cc
++++ b/src/mem/ruby/slicc_interface/RubyRequest.cc
+@@ -67,6 +67,22 @@ RubyRequest::functionalWrite(Packet *pkt)
+     // has to overwrite the data for the timing request, even if the
+     // timing request has still not been ordered globally.
+ 
++    // maskedWrites related patch
++    // https://gem5-review.googlesource.com/c/public/gem5/+/41133/2
++
++    if (!data){
++        warn("Skipping functional write !data case,"
++            " (addr: %#x, other addr: %#x).\n", m_PhysicalAddress,
++              pkt->getAddr());
++        return false;
++    }
++    if (pkt->isMaskedWrite() || m_pkt->isMaskedWrite()) {
++        warn("Skiping functional write to/from a masked write packet"
++            " (addr: %#x, other addr: %#x).\n", m_PhysicalAddress,
++              pkt->getAddr());
++        return false;
++    }
++
+     Addr wBase = pkt->getAddr();
+     Addr wTail = wBase + pkt->getSize();
+     Addr mBase = m_PhysicalAddress;
+diff --git a/src/mem/ruby/structures/CacheMemory.cc b/src/mem/ruby/structures/CacheMemory.cc
+index 5dc346388f..77ad5269fe 100644
+--- a/src/mem/ruby/structures/CacheMemory.cc
++++ b/src/mem/ruby/structures/CacheMemory.cc
+@@ -164,7 +164,7 @@ CacheMemory::tryCacheAccess(Addr address, RubyRequestType type,
+                             DataBlock*& data_ptr)
+ {
+     assert(address == makeLineAddress(address));
+-    DPRINTF(RubyCache, "address: %#x\n", address);
++    DPRINTF(RubyCache, "tryCacheAccess: address: %#x\n", address);
+     int64_t cacheSet = addressToCacheSet(address);
+     int loc = findTagInSet(cacheSet, address);
+     if (loc != -1) {
+@@ -191,7 +191,7 @@ CacheMemory::testCacheAccess(Addr address, RubyRequestType type,
+                              DataBlock*& data_ptr)
+ {
+     assert(address == makeLineAddress(address));
+-    DPRINTF(RubyCache, "address: %#x\n", address);
++    DPRINTF(RubyCache, "testCacheAccess: address: %#x\n", address);
+     int64_t cacheSet = addressToCacheSet(address);
+     int loc = findTagInSet(cacheSet, address);
+ 
+@@ -257,7 +257,7 @@ CacheMemory::allocate(Addr address, AbstractCacheEntry *entry, bool touch)
+     assert(address == makeLineAddress(address));
+     assert(!isTagPresent(address));
+     assert(cacheAvail(address));
+-    DPRINTF(RubyCache, "address: %#x\n", address);
++    DPRINTF(RubyCache, "allocate: address: %#x\n", address);
+ 
+     // Find the first open slot
+     int64_t cacheSet = addressToCacheSet(address);
+diff --git a/src/mem/ruby/structures/DirectoryMemory.cc b/src/mem/ruby/structures/DirectoryMemory.cc
+index 551e3f57ff..62c726fea6 100644
+--- a/src/mem/ruby/structures/DirectoryMemory.cc
++++ b/src/mem/ruby/structures/DirectoryMemory.cc
+@@ -125,7 +125,8 @@ DirectoryMemory::allocate(Addr address, AbstractEntry *entry)
+ {
+     assert(isPresent(address));
+     uint64_t idx;
+-    DPRINTF(RubyCache, "Looking up address: %#x\n", address);
++    //ppetrak: adjusted this output message
++    DPRINTF(RubyCache, "Allocate address: %#x\n", address);
+ 
+     idx = mapAddressToLocalIdx(address);
+     assert(idx < m_num_entries);
+diff --git a/src/mem/ruby/system/DMASequencer.cc b/src/mem/ruby/system/DMASequencer.cc
+index bad49c97d3..250ca14543 100644
+--- a/src/mem/ruby/system/DMASequencer.cc
++++ b/src/mem/ruby/system/DMASequencer.cc
+@@ -73,6 +73,9 @@ DMASequencer::makeRequest(PacketPtr pkt)
+     int len = pkt->getSize();
+     bool write = pkt->isWrite();
+ 
++    // Should DMA be allowed to generate this ?
++    assert(!pkt->isMaskedWrite());
++
+     assert(m_outstanding_count < m_max_outstanding_requests);
+     Addr line_addr = makeLineAddress(paddr);
+     auto emplace_pair =
+diff --git a/src/mem/ruby/system/RubySystem.cc b/src/mem/ruby/system/RubySystem.cc
+index 83fa4c7ce6..a15ed20fc8 100644
+--- a/src/mem/ruby/system/RubySystem.cc
++++ b/src/mem/ruby/system/RubySystem.cc
+@@ -38,6 +38,7 @@
+ #include "base/statistics.hh"
+ #include "debug/RubyCacheTrace.hh"
+ #include "debug/RubySystem.hh"
++#include "debug/ResetTrace.hh"
+ #include "mem/ruby/common/Address.hh"
+ #include "mem/ruby/network/Network.hh"
+ #include "mem/simple_mem.hh"
+@@ -392,7 +393,14 @@ RubySystem::processRubyEvent()
+ void
+ RubySystem::resetStats()
+ {
++    DPRINTF(ResetTrace, "RubySystem::resetStats() called\n");
+     m_start_cycle = curCycle();
++    m_network->resetStats();
++
++    int num_controllers = m_abs_cntrl_vec.size();
++    for (unsigned int i = 0; i < num_controllers; ++i) {
++        m_abs_cntrl_vec[i]->resetStats();
++    }
+ }
+ 
+ bool
+diff --git a/src/mem/ruby/system/Sequencer.cc b/src/mem/ruby/system/Sequencer.cc
+index 9d317aaa0c..dc90b12da1 100644
+--- a/src/mem/ruby/system/Sequencer.cc
++++ b/src/mem/ruby/system/Sequencer.cc
+@@ -26,6 +26,24 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++// FORTH-ICS: Polydoros Petrakis <ppetrak@ics.forth.gr>
++// FORTH-ICS: Vassilis Papaefstathiou <papaef@ics.forth.gr>
++// FORTH-ICS: Manolis Marazakis <maraz@ics.forth.gr>
++//
++// Adjustments in Ruby Sequencer in order to avoid port blocking, when we have
++// aliased requests.
++// Implementation steps:
++// a) makeRequest was renamed to makeRequest_default
++// b) When m_sequencer_port_block_bypass is enabled then:
++// In makeRequest any aliased requests will now be considered issued, and
++// those packets will be inserted in a PktMap. Whenever we have a hitCallback
++// to line_addr X, then we search the PktMap for any entries with same line_addr
++// and if pending aliased packets are found inside, then we issue the oldest one.
++// Upon successfull issue we remove that pkt from the map.
++// Note: Both read/write packets are placed in the same PktMap
++// Useful link: http://gem5.org/Coherence-Protocol-Independent_Memory_Components
++//
++
+ #include "mem/ruby/system/Sequencer.hh"
+ 
+ #include "arch/x86/ldstflags.hh"
+@@ -36,6 +54,7 @@
+ #include "debug/ProtocolTrace.hh"
+ #include "debug/RubySequencer.hh"
+ #include "debug/RubyStats.hh"
++#include "debug/RubyForthSequencer.hh"
+ #include "mem/packet.hh"
+ #include "mem/ruby/profiler/Profiler.hh"
+ #include "mem/ruby/protocol/PrefetchBit.hh"
+@@ -61,6 +80,9 @@ Sequencer::Sequencer(const Params *p)
+     m_instCache_ptr = p->icache;
+     m_dataCache_ptr = p->dcache;
+     m_max_outstanding_requests = p->max_outstanding_requests;
++    //m_max_outstanding_read_requests = p->max_outstanding_read_requests;
++    //m_max_outstanding_write_requests = p->max_outstanding_write_requests;
++
+     m_deadlock_threshold = p->deadlock_threshold;
+ 
+     m_coreId = p->coreid; // for tracking the two CorePair sequencers
+@@ -70,6 +92,9 @@ Sequencer::Sequencer(const Params *p)
+     assert(m_dataCache_ptr != NULL);
+ 
+     m_runningGarnetStandalone = p->garnet_standalone;
++
++    m_sequencer_port_block_bypass = p->sequencer_port_block_bypass;
++    m_aliased_pkts_counter = 0;
+ }
+ 
+ Sequencer::~Sequencer()
+@@ -130,6 +155,10 @@ Sequencer::wakeup()
+ 
+ void Sequencer::resetStats()
+ {
++    m_aliasedPktsMapSizeHist.reset();
++    m_aliasedPktsHist.reset();
++    m_outstandReqHist.reset();
++
+     m_latencyHist.reset();
+     m_hitLatencyHist.reset();
+     m_missLatencyHist.reset();
+@@ -175,6 +204,7 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType request_type)
+     // Check if the line is blocked for a Locked_RMW
+     if (m_controller->isBlocked(line_addr) &&
+         (request_type != RubyRequestType_Locked_RMW_Write)) {
++        //todo: add print here
+         // Return that this request's cache line address aliases with
+         // a prior request that locked the cache line. The request cannot
+         // proceed until the cache line is unlocked by a Locked_RMW_Write
+@@ -198,6 +228,7 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType request_type)
+         // Check if there is any outstanding read request for the same
+         // cache line.
+         if (m_readRequestTable.count(line_addr) > 0) {
++            // Aliasing case-1
+             m_store_waiting_on_load++;
+             return RequestStatus_Aliased;
+         }
+@@ -209,14 +240,16 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType request_type)
+             i->second = new SequencerRequest(pkt, request_type, curCycle());
+             m_outstanding_count++;
+         } else {
+-          // There is an outstanding write request for the cache line
+-          m_store_waiting_on_store++;
+-          return RequestStatus_Aliased;
++            // There is an outstanding write request for the cache line
++            // Aliasing case-2
++            m_store_waiting_on_store++;
++            return RequestStatus_Aliased;
+         }
+     } else {
+         // Check if there is any outstanding write request for the same
+         // cache line.
+         if (m_writeRequestTable.count(line_addr) > 0) {
++            // Aliasing case-3
+             m_load_waiting_on_store++;
+             return RequestStatus_Aliased;
+         }
+@@ -230,6 +263,7 @@ Sequencer::insertRequest(PacketPtr pkt, RubyRequestType request_type)
+             m_outstanding_count++;
+         } else {
+             // There is an outstanding read request for the cache line
++            // Aliasing case-4
+             m_load_waiting_on_load++;
+             return RequestStatus_Aliased;
+         }
+@@ -464,8 +498,7 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
+ 
+     // update the data unless it is a non-data-carrying flush
+     if (RubySystem::getWarmupEnabled()) {
+-        data.setData(pkt->getConstPtr<uint8_t>(),
+-                     getOffset(request_address), pkt->getSize());
++        data.setData(pkt);
+     } else if (!pkt->isFlush()) {
+         if ((type == RubyRequestType_LD) ||
+             (type == RubyRequestType_IFETCH) ||
+@@ -476,6 +509,7 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
+                 data.getData(getOffset(request_address), pkt->getSize()));
+             DPRINTF(RubySequencer, "read data %s\n", data);
+         } else if (pkt->req->isSwap()) {
++            assert(!pkt->isMaskedWrite());
+             std::vector<uint8_t> overwrite_val(pkt->getSize());
+             pkt->writeData(&overwrite_val[0]);
+             pkt->setData(
+@@ -486,8 +520,7 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
+         } else if (type != RubyRequestType_Store_Conditional || llscSuccess) {
+             // Types of stores set the actual data here, apart from
+             // failed Store Conditional requests
+-            data.setData(pkt->getConstPtr<uint8_t>(),
+-                         getOffset(request_address), pkt->getSize());
++            data.setData(pkt);
+             DPRINTF(RubySequencer, "set data %s\n", data);
+         }
+     }
+@@ -518,6 +551,53 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
+         ruby_hit_callback(pkt);
+         testDrainComplete();
+     }
++
++    if (m_sequencer_port_block_bypass) {
++
++        // FORTH: Code that checks for any pending aliased requests
++        Addr line_addr = makeLineAddress(request_address);
++        if ( m_aliased_PktMap.count(line_addr) > 0 ){
++
++            PktMap::iterator i = m_aliased_PktMap.find(line_addr);
++            assert(i != m_aliased_PktMap.end() );
++            PacketQueue* pkt_queue = i->second;
++            assert(pkt_queue);
++
++            PacketPtr top_packet = pkt_queue->front();
++            // Attempt to issue the request
++            RequestStatus status = makeRequest_default(top_packet);
++            if(status == RequestStatus_Issued ){
++                DPRINTF(RubyForthSequencer,
++                "SameAddr: hit: BlockedPkt[%s], Addr[%lx], "
++                "CompletedType[%s], Addr[%lx]\n",
++                    top_packet->cmdString(),
++                    top_packet->getAddr(),
++                    type, request_address);
++
++                pkt_queue->pop();
++                m_aliased_pkts_counter--;
++                if(pkt_queue->size() == 0 ){
++                    m_aliased_PktMap.erase(i);
++                    delete pkt_queue;
++                }
++            }else{
++                // ppetrak: There could be a case of deadlock in case that
++                // makeRequest_default returns RequestStatus_BufferFull
++                // We tackle this issue, by ignoring max_outstanding check
++                // in the cases of pending aliased requests.
++                // This should not be a problem as long as
++                // average_outstanding requests stays way lower than the
++                // max_outstanding. However, we could try another approach
++                // if needed.
++                panic("Issue Failed for aliased packet: %s, "
++                "line_queue_sz[%d], ret_status = %d, "
++                "current outstanding requests = %d\n",
++                top_packet, pkt_queue->size(), status, m_outstanding_count );
++            }
++        }
++
++    }
++
+ }
+ 
+ bool
+@@ -607,6 +687,35 @@ Sequencer::makeRequest(PacketPtr pkt)
+     }
+ 
+     RequestStatus status = insertRequest(pkt, primary_type);
++
++    if ( m_sequencer_port_block_bypass ){
++
++        // Add any aliased requests to m_aliased_PktMap and consider them issued
++        if (status == RequestStatus_Aliased ){
++
++            Addr line_addr = makeLineAddress(pkt->getAddr());
++            if( m_aliased_PktMap.count(line_addr) > 0 ) {
++                PktMap::iterator i = m_aliased_PktMap.find(line_addr);
++                assert(i != m_aliased_PktMap.end());
++                PacketQueue* pkt_Queue = i->second;
++                //pkt->pseudo_issue_time = curCycle();
++                pkt_Queue->push(pkt);
++                m_aliased_pkts_counter++;
++            }else{
++                PacketQueue* pkt_queue = new PacketQueue();
++                //pkt->pseudo_issue_time = curCycle();
++                pkt_queue->push(pkt);
++                m_aliased_PktMap[line_addr] = pkt_queue;
++                m_aliased_pkts_counter++;
++                m_aliasedPktsMapSizeHist.sample(m_aliased_PktMap.size());
++            }
++            m_aliasedPktsHist.sample(m_aliased_pkts_counter);
++            // ppetrak: Return issued although pkt was not really issued!
++            // But we have added the request in the m_aliased_PktMap
++            return RequestStatus_Issued;
++        }
++    }
++
+     if (status != RequestStatus_Ready)
+         return status;
+ 
+@@ -616,6 +725,102 @@ Sequencer::makeRequest(PacketPtr pkt)
+     return RequestStatus_Issued;
+ }
+ 
++RequestStatus
++Sequencer::makeRequest_default(PacketPtr pkt)
++{
++    // ppetrak: Bypass this check for now so that we are sure
++    // that aliased requests will not stay pending for ever
++    // in case of a RequestStatus_BufferFull
++    /*
++    if (m_outstanding_count >= m_max_outstanding_requests) {
++        return RequestStatus_BufferFull;
++    }
++    */
++    RubyRequestType primary_type = RubyRequestType_NULL;
++    RubyRequestType secondary_type = RubyRequestType_NULL;
++
++    if (pkt->isLLSC()) {
++        //
++        // Alpha LL/SC instructions need to be handled carefully by the cache
++        // coherence protocol to ensure they follow the proper semantics. In
++        // particular, by identifying the operations as atomic, the protocol
++        // should understand that migratory sharing optimizations should not
++        // be performed (i.e. a load between the LL and SC should not steal
++        // away exclusive permission).
++        //
++        if (pkt->isWrite()) {
++            DPRINTF(RubySequencer, "Issuing SC\n");
++            primary_type = RubyRequestType_Store_Conditional;
++        } else {
++            DPRINTF(RubySequencer, "Issuing LL\n");
++            assert(pkt->isRead());
++            primary_type = RubyRequestType_Load_Linked;
++        }
++        secondary_type = RubyRequestType_ATOMIC;
++    } else if (pkt->req->isLockedRMW()) {
++        //
++        // x86 locked instructions are translated to store cache coherence
++        // requests because these requests should always be treated as read
++        // exclusive operations and should leverage any migratory sharing
++        // optimization built into the protocol.
++        //
++        if (pkt->isWrite()) {
++            DPRINTF(RubySequencer, "Issuing Locked RMW Write\n");
++            primary_type = RubyRequestType_Locked_RMW_Write;
++        } else {
++            DPRINTF(RubySequencer, "Issuing Locked RMW Read\n");
++            assert(pkt->isRead());
++            primary_type = RubyRequestType_Locked_RMW_Read;
++        }
++        secondary_type = RubyRequestType_ST;
++    } else {
++        //
++        // To support SwapReq, we need to check isWrite() first: a SwapReq
++        // should always be treated like a write, but since a SwapReq implies
++        // both isWrite() and isRead() are true, check isWrite() first here.
++        //
++        if (pkt->isWrite()) {
++            //
++            // Note: M5 packets do not differentiate ST from RMW_Write
++            //
++            primary_type = secondary_type = RubyRequestType_ST;
++        } else if (pkt->isRead()) {
++            if (pkt->req->isInstFetch()) {
++                primary_type = secondary_type = RubyRequestType_IFETCH;
++            } else {
++                bool storeCheck = false;
++                // only X86 need the store check
++                if (system->getArch() == Arch::X86ISA) {
++                    uint32_t flags = pkt->req->getFlags();
++                    storeCheck = flags &
++                        (X86ISA::StoreCheck << X86ISA::FlagShift);
++                }
++                if (storeCheck) {
++                    primary_type = RubyRequestType_RMW_Read;
++                    secondary_type = RubyRequestType_ST;
++                } else {
++                    primary_type = secondary_type = RubyRequestType_LD;
++                }
++            }
++        } else if (pkt->isFlush()) {
++          primary_type = secondary_type = RubyRequestType_FLUSH;
++        } else {
++            panic("Unsupported ruby packet type\n");
++        }
++    }
++
++    RequestStatus status = insertRequest(pkt, primary_type);
++
++    if (status != RequestStatus_Ready){
++        return status;
++    }
++
++    issueRequest(pkt, secondary_type);
++
++    // TODO: issue hardware prefetches here
++    return RequestStatus_Issued;
++}
++
+ void
+ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
+ {
+@@ -648,6 +853,9 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
+ 
+     Tick latency = cyclesToTicks(
+                         m_controller->mandatoryQueueLatency(secondary_type));
++
++    // ppetrak: Remove latency from mandatoryQueue. It stalls iFETCH
++    latency = 1;
+     assert(latency > 0);
+ 
+     assert(m_mandatory_q_ptr != NULL);
+@@ -730,6 +938,9 @@ Sequencer::regStats()
+     m_hitLatencyHist.init(10);
+     m_missLatencyHist.init(10);
+ 
++    m_aliasedPktsHist.init(10);
++    m_aliasedPktsMapSizeHist.init(10);
++
+     for (int i = 0; i < RubyRequestType_NUM; i++) {
+         m_typeLatencyHist.push_back(new Stats::Histogram());
+         m_typeLatencyHist[i]->init(10);
+diff --git a/src/mem/ruby/system/Sequencer.hh b/src/mem/ruby/system/Sequencer.hh
+index 33fd53064c..5297df1eec 100644
+--- a/src/mem/ruby/system/Sequencer.hh
++++ b/src/mem/ruby/system/Sequencer.hh
+@@ -31,6 +31,7 @@
+ 
+ #include <iostream>
+ #include <unordered_map>
++#include <queue>
+ 
+ #include "mem/ruby/common/Address.hh"
+ #include "mem/ruby/protocol/MachineType.hh"
+@@ -84,6 +85,7 @@ class Sequencer : public RubyPort
+                       const Cycles firstResponseTime = Cycles(0));
+ 
+     RequestStatus makeRequest(PacketPtr pkt);
++    RequestStatus makeRequest_default(PacketPtr pkt);
+     bool empty() const;
+     int outstandingCount() const { return m_outstanding_count; }
+ 
+@@ -103,6 +105,8 @@ class Sequencer : public RubyPort
+ 
+     void recordRequestType(SequencerRequestType requestType);
+     Stats::Histogram& getOutstandReqHist() { return m_outstandReqHist; }
++    Stats::Histogram& getAliasedPktsHist() { return m_aliasedPktsHist; }
++    Stats::Histogram& getAliasedPktsMapSizeHist() { return m_aliasedPktsMapSizeHist;}
+ 
+     Stats::Histogram& getLatencyHist() { return m_latencyHist; }
+     Stats::Histogram& getTypeLatencyHist(uint32_t t)
+@@ -173,9 +177,15 @@ class Sequencer : public RubyPort
+     Sequencer& operator=(const Sequencer& obj);
+ 
+   private:
++    // ppetrak:Used to enable/disable FORTH Sequencer
++    bool m_sequencer_port_block_bypass;
++
++    //Counter for entries of m_aliased_PktMap
++    int m_aliased_pkts_counter;
++
+     int m_max_outstanding_requests;
+-    Cycles m_deadlock_threshold;
+ 
++    Cycles m_deadlock_threshold;
+     CacheMemory* m_dataCache_ptr;
+     CacheMemory* m_instCache_ptr;
+ 
+@@ -189,8 +199,19 @@ class Sequencer : public RubyPort
+     typedef std::unordered_map<Addr, SequencerRequest*> RequestTable;
+     RequestTable m_writeRequestTable;
+     RequestTable m_readRequestTable;
++
++    //ppetrak: Additions for Aliased Requests Map
++    typedef std::queue<PacketPtr> PacketQueue;
++    typedef std::unordered_map<Addr, PacketQueue*> PktMap;
++    PktMap m_aliased_PktMap;
++
+     // Global outstanding request count, across all request tables
+     int m_outstanding_count;
++
++    //TODO:
++    //int m_outstanding_read_requests_count;
++    //int m_outstanding_write_requests_count;
++
+     bool m_deadlock_check_scheduled;
+ 
+     //! Counters for recording aliasing information.
+@@ -205,6 +226,8 @@ class Sequencer : public RubyPort
+ 
+     //! Histogram for number of outstanding requests per cycle.
+     Stats::Histogram m_outstandReqHist;
++    Stats::Histogram m_aliasedPktsHist;
++    Stats::Histogram m_aliasedPktsMapSizeHist;
+ 
+     //! Histogram for holding latency profile of all requests.
+     Stats::Histogram m_latencyHist;
+diff --git a/src/mem/ruby/system/Sequencer.py b/src/mem/ruby/system/Sequencer.py
+index 47f51462b0..f09254167a 100644
+--- a/src/mem/ruby/system/Sequencer.py
++++ b/src/mem/ruby/system/Sequencer.py
+@@ -64,8 +64,11 @@ class RubySequencer(RubyPort):
+    icache = Param.RubyCache("")
+    dcache = Param.RubyCache("")
+ 
+-   max_outstanding_requests = Param.Int(16,
++   max_outstanding_requests = Param.Int(128,
+        "max requests (incl. prefetches) outstanding")
++   sequencer_port_block_bypass = Param.Bool(True,
++   "Use True to enable FORTH Sequencer to avoid port block due to addr aliasing")
++
+    deadlock_threshold = Param.Cycles(500000,
+        "max outstanding cycles for a request before deadlock/livelock declared")
+    garnet_standalone = Param.Bool(False, "")
+diff --git a/src/mem/slicc/symbols/StateMachine.py b/src/mem/slicc/symbols/StateMachine.py
+index a92e078e22..b1a2edb3c6 100644
+--- a/src/mem/slicc/symbols/StateMachine.py
++++ b/src/mem/slicc/symbols/StateMachine.py
+@@ -95,6 +95,7 @@ class StateMachine(Symbol):
+         self.debug_flags = set()
+         self.debug_flags.add('RubyGenerated')
+         self.debug_flags.add('RubySlicc')
++        self.debug_flags.add('ResetTrace')
+ 
+     def __repr__(self):
+         return "[StateMachine: %s]" % self.ident
+@@ -778,6 +779,8 @@ $c_ident::regStats()
+ void
+ $c_ident::collateStats()
+ {
++    DPRINTF(ResetTrace, "%15d: Collating stats.\\n", curTick());
++
+     for (${ident}_Event event = ${ident}_Event_FIRST;
+          event < ${ident}_Event_NUM; ++event) {
+         for (unsigned int i = 0; i < m_num_controllers; ++i) {
+@@ -867,9 +870,12 @@ $c_ident::print(ostream& out) const
+ 
+ void $c_ident::resetStats()
+ {
++    DPRINTF(ResetTrace, "%15d Resetting stats\\n", curTick());
+     for (int state = 0; state < ${ident}_State_NUM; state++) {
+         for (int event = 0; event < ${ident}_Event_NUM; event++) {
+             m_counters[state][event] = 0;
++            //DPRINTF(ResetTrace, "%s Resetting state: %s, event: %s \\n",
++            //*this, ${ident}_State_to_string((${ident}_State)state), ${ident}_Event_to_string((${ident}_Event)event));
+         }
+     }
+ 
+@@ -1171,6 +1177,7 @@ ${ident}_Controller::wakeup()
+ #include "base/logging.hh"
+ #include "base/trace.hh"
+ #include "debug/ProtocolTrace.hh"
++#include "debug/ResetTrace.hh"
+ #include "debug/RubyGenerated.hh"
+ #include "mem/ruby/protocol/${ident}_Controller.hh"
+ #include "mem/ruby/protocol/${ident}_Event.hh"
+diff --git a/src/python/m5/stats/__init__.py b/src/python/m5/stats/__init__.py
+index 4b118ea13e..7211745985 100644
+--- a/src/python/m5/stats/__init__.py
++++ b/src/python/m5/stats/__init__.py
+@@ -365,6 +365,10 @@ def dump(root=None):
+     # Only prepare stats the first time we dump them in the same tick.
+     if new_dump:
+         _m5.stats.processDumpQueue()
++        # Notify new-style stats group that we are about to dump stats.
++        sim_root = Root.getInstance()
++        if sim_root:
++            sim_root.preDumpStats();
+         prepare()
+ 
+     for output in outputList:
+diff --git a/src/python/m5/util/dot_writer_ruby.py b/src/python/m5/util/dot_writer_ruby.py
+index db115f5f04..c7d5f9723c 100644
+--- a/src/python/m5/util/dot_writer_ruby.py
++++ b/src/python/m5/util/dot_writer_ruby.py
+@@ -58,7 +58,7 @@ def _dot_create_router_node(full_path, label):
+                          color = "#000000", \
+                          fillcolor = _dot_rgb_to_html(204, 230, 252), \
+                          fontname = "Arial", \
+-                         fontsize = "14", \
++                         fontsize = "10", \
+                          fontcolor = "#000000" \
+                          )
+ 
+@@ -71,7 +71,7 @@ def _dot_create_ctrl_node(full_path, label):
+                          color = "#000000", \
+                          fillcolor = _dot_rgb_to_html(229, 188, 208), \
+                          fontname = "Arial", \
+-                         fontsize = "14", \
++                         fontsize = "10", \
+                          fontcolor = "#000000" \
+                          )
+ 
+diff --git a/src/python/pybind11/stats.cc b/src/python/pybind11/stats.cc
+index 190c78d52d..b1f4209782 100644
+--- a/src/python/pybind11/stats.cc
++++ b/src/python/pybind11/stats.cc
+@@ -127,6 +127,7 @@ pybind_init_stats(py::module &m_native)
+         m, "Group")
+         .def("regStats", &Stats::Group::regStats)
+         .def("resetStats", &Stats::Group::resetStats)
++        .def("preDumpStats", &Stats::Group::preDumpStats)
+         .def("getStats", &Stats::Group::getStats)
+         .def("getStatGroups", &Stats::Group::getStatGroups)
+         .def("addStatGroup", &Stats::Group::addStatGroup)
+diff --git a/util/regress b/util/regress
+index 873d9cc85e..e2443c9bf0 100755
+--- a/util/regress
++++ b/util/regress
+@@ -165,7 +165,7 @@ if options.update_ref:
+ # link-time optimization.
+ scons_opts += ' --no-lto'
+ 
+-cmd = 'scons --ignore-style %s %s' % (scons_opts, ' '.join(targets))
++cmd = 'CXX=g++-7 scons --ignore-style %s %s' % (scons_opts, ' '.join(targets))
+ if options.no_exec:
+     print cmd
+ else:
