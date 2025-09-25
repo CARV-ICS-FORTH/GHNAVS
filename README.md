@@ -244,11 +244,11 @@ Those types of messages contain the following fields:
 
 ## IV. References
 
-[1] [http://old.gem5.org/Garnet2.0.html](http://old.gem5.org/Garnet2.0.html)
+[1] [https://old.gem5.org/Garnet2.0.html](http://old.gem5.org/Garnet2.0.html)
 
-[2] [http://old.gem5.org/Ruby.html](http://old.gem5.org/Ruby.html)
+[2] [https://www.gem5.org/documentation/general_docs/ruby/](https://www.gem5.org/documentation/general_docs/ruby/)
 
-[3] [http://old.gem5.org/Coherence-Protocol-Independent_Memory_Components.html](http://old.gem5.org/Coherence-Protocol-Independent_Memory_Components.html)
+[3] [https://old.gem5.org/Coherence-Protocol-Independent_Memory_Components.html](http://old.gem5.org/Coherence-Protocol-Independent_Memory_Components.html)
 
 [4] [https://www.cs.virginia.edu/stream/](https://www.cs.virginia.edu/stream/)
 
